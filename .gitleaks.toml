@@ -1,0 +1,7 @@
+[allowlist]
+description = "Ignore test fixtures and idempotency keys in test files"
+paths = [
+    '''_test\.go$''',
+    '''requests\.http$''',
+    '''cmd/loadtest/'''
+]

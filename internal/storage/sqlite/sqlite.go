@@ -1,0 +1,107 @@
+package sqlite
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+
+	_ "modernc.org/sqlite"
+)
+
+type Storage struct {
+	db *sql.DB
+}
+
+func Open(dbPath, migrationsDir string) (*Storage, error) {
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o750); err != nil {
+		return nil, fmt.Errorf("create db dir: %w", err)
+	}
+
+	dsn := fmt.Sprintf("file:%s?_busy_timeout=5000&_journal_mode=WAL&_foreign_keys=on&_txlock=immediate", dbPath)
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open sqlite: %w", err)
+	}
+
+	db.SetMaxOpenConns(50)
+	db.SetMaxIdleConns(50)
+	db.SetConnMaxLifetime(0)
+
+	s := &Storage{db: db}
+	if migrationsDir != "" {
+		if err := s.migrate(migrationsDir); err != nil {
+			if closeErr := db.Close(); closeErr != nil {
+				return nil, errors.Join(fmt.Errorf("apply migrations: %w", err), fmt.Errorf("close db: %w", closeErr))
+			}
+			return nil, fmt.Errorf("apply migrations: %w", err)
+		}
+	}
+
+	return s, nil
+}
+
+func (s *Storage) DB() *sql.DB {
+	return s.db
+}
+
+func (s *Storage) Close() error {
+	return s.db.Close()
+}
+
+func (s *Storage) Users() *UserRepository                   { return NewUserRepository(s.db) }
+func (s *Storage) Orders() *OrderRepository                 { return NewOrderRepository(s.db) }
+func (s *Storage) Payments() *PaymentRepository             { return NewPaymentRepository(s.db) }
+func (s *Storage) Webhooks() *WebhookEventRepository        { return NewWebhookEventRepository(s.db) }
+func (s *Storage) PaymentEvents() *PaymentEventRepository   { return NewPaymentEventRepository(s.db) }
+func (s *Storage) SecurityEvents() *SecurityEventRepository { return NewSecurityEventRepository(s.db) }
+
+func (s *Storage) WithinTransaction(ctx context.Context, fn func(txCtx context.Context, tx *sql.Tx) error) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+
+	if err := fn(ctx, tx); err != nil {
+		if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
+			return errors.Join(err, fmt.Errorf("rollback transaction: %w", rbErr))
+		}
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit transaction: %w", err)
+	}
+
+	return nil
+}
+
+func (s *Storage) migrate(migrationsDir string) error {
+	entries, err := os.ReadDir(migrationsDir)
+	if err != nil {
+		return fmt.Errorf("read migrations dir: %w", err)
+	}
+
+	var files []string
+	for _, e := range entries {
+		if !e.IsDir() && filepath.Ext(e.Name()) == ".sql" {
+			files = append(files, e.Name())
+		}
+	}
+	sort.Strings(files)
+
+	for _, name := range files {
+		cleanPath := filepath.Clean(filepath.Join(migrationsDir, name))
+		data, err := os.ReadFile(cleanPath)
+		if err != nil {
+			return fmt.Errorf("read migration %s: %w", name, err)
+		}
+		if _, err := s.db.Exec(string(data)); err != nil {
+			return fmt.Errorf("apply migration %s: %w", name, err)
+		}
+	}
+	return nil
+}

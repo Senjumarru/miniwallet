@@ -1,0 +1,160 @@
+### MiniWallet — проверка API
+### Расширение: REST Client (humao.rest-client) для VS Code.
+
+@host = http://localhost:8080
+@token = PASTE_TOKEN_FROM_LOGIN_HERE
+
+### 0. Health — сервис жив
+GET {{host}}/health
+
+### 1.1 Регистрация Alice
+POST {{host}}/auth/register
+Content-Type: application/json
+
+{
+  "email": "alinursarsekov@gmail.com",
+  "password": "password123"
+}
+
+### 1.2 Регистрация Bob
+POST {{host}}/auth/register
+Content-Type: application/json
+
+{
+  "email": "bob@example.kz",
+  "password": "password123"
+}
+
+### 1.3 Дубликат email — 409 email_taken
+POST {{host}}/auth/register
+Content-Type: application/json
+
+{
+  "email": "alinursarsekov@gmail.com",
+  "password": "password123"
+}
+
+### 1.4 Короткий пароль — 400 weak_password
+POST {{host}}/auth/register
+Content-Type: application/json
+
+{
+  "email": "eve@example.kz",
+  "password": "short"
+}
+
+### 2.1 Логин Alice — скопируй token из ответа в @token сверху
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "alice@example.kz",
+  "password": "password123"
+}
+
+### 2.2 Логин с неверным паролем — 401
+POST {{host}}/auth/login
+Content-Type: application/json
+
+{
+  "email": "alice@example.kz",
+  "password": "wrong-password"
+}
+
+### 3.1 Мой баланс (JWT)
+GET {{host}}/accounts/me
+Authorization: Bearer {{token}}
+
+### 3.2 Без токена — 401
+GET {{host}}/accounts/me
+
+### 4.1 Пополнение на 1000.50 KZT = 100050 тиынов
+POST {{host}}/accounts/deposit
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "amount": 100050
+}
+
+### 4.2 Нулевая сумма — 400
+POST {{host}}/accounts/deposit
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "amount": 0
+}
+
+### 5.1 Перевод Bob'у 300 тиынов (Idempotency-Key обязателен!)
+POST {{host}}/transfers
+Content-Type: application/json
+Authorization: Bearer {{token}}
+Idempotency-Key: my-first-transfer-001
+
+{
+  "to_email": "bob@example.kz",
+  "amount": 300
+}
+
+### 5.2 Повтор с тем же ключом — вернётся тот же перевод (idempotent_replay: true)
+POST {{host}}/transfers
+Content-Type: application/json
+Authorization: Bearer {{token}}
+Idempotency-Key: my-first-transfer-001
+
+{
+  "to_email": "bob@example.kz",
+  "amount": 300
+}
+
+### 5.3 Тот же ключ, другая сумма — 409 idempotency_conflict
+POST {{host}}/transfers
+Content-Type: application/json
+Authorization: Bearer {{token}}
+Idempotency-Key: my-first-transfer-001
+
+{
+  "to_email": "bob@example.kz",
+  "amount": 500
+}
+
+### 5.4 Без ключа — 400 idempotency_key_required
+POST {{host}}/transfers
+Content-Type: application/json
+Authorization: Bearer {{token}}
+
+{
+  "to_email": "bob@example.kz",
+  "amount": 100
+}
+
+### 5.5 Перевод самому себе — 400
+POST {{host}}/transfers
+Content-Type: application/json
+Authorization: Bearer {{token}}
+Idempotency-Key: self-001
+
+{
+  "to_email": "alice@example.kz",
+  "amount": 100
+}
+
+### 5.6 Больше, чем есть на счету — 422 insufficient_funds
+POST {{host}}/transfers
+Content-Type: application/json
+Authorization: Bearer {{token}}
+Idempotency-Key: big-001
+
+{
+  "to_email": "bob@example.kz",
+  "amount": 99999999
+}
+
+### 6.1 История операций (первые 20)
+GET {{host}}/transactions?limit=20&offset=0
+Authorization: Bearer {{token}}
+
+### 6.2 Пагинация: вторая страница по 2 записи
+GET {{host}}/transactions?limit=2&offset=2
+Authorization: Bearer {{token}}

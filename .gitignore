@@ -1,0 +1,15 @@
+# Бинарники и локальные артефакты
+server
+miniwallet
+*.exe
+
+# Локальная база данных SQLite
+*.db
+*.db-shm
+*.db-wal
+*.log
+# Environment-файлы с секретами
+.env
+
+# Go
+/vendor/
