@@ -20,6 +20,7 @@ type Config struct {
 	InitialRetryDelay time.Duration
 	MaxRetryDelay     time.Duration
 	LogLevel          string
+	Dev               bool
 }
 
 func Load() (*Config, error) {
@@ -72,6 +73,7 @@ func Load() (*Config, error) {
 		InitialRetryDelay: 100 * time.Millisecond,
 		MaxRetryDelay:     2 * time.Second,
 		LogLevel:          getEnv("LOG_LEVEL", "info"),
+		Dev:               isDev,
 	}
 
 	if t := os.Getenv("PROVIDER_TIMEOUT_MS"); t != "" {
@@ -91,13 +93,30 @@ func Load() (*Config, error) {
 
 func isDevSecret(secret string) bool {
 	lower := strings.ToLower(secret)
-	if strings.Contains(lower, "change-me") ||
-		strings.Contains(lower, "dev-secret") ||
-		strings.Contains(lower, "dev-jwt-secret") ||
-		strings.Contains(lower, "dev-webhook-secret") {
-		return true
+	markers := []string{
+		"change-me",
+		"changeme",
+		"dev-secret",
+		"dev-jwt-secret",
+		"dev-webhook-secret",
+		"password",
+		"example",
 	}
-	return false
+	for _, m := range markers {
+		if strings.Contains(lower, m) {
+			return true
+		}
+	}
+
+	// Отказ для секретов менее чем с 8 разными символами (низкая энтропия)
+	distinct := make(map[rune]struct{}, 8)
+	for _, r := range secret {
+		distinct[r] = struct{}{}
+		if len(distinct) >= 8 {
+			return false
+		}
+	}
+	return true
 }
 
 func getEnv(key, defaultVal string) string {

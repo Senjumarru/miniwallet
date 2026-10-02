@@ -1,6 +1,7 @@
 # Бинарники и локальные артефакты
-server
-miniwallet
+/server
+/miniwallet
+bin/
 *.exe
 
 # Локальная база данных SQLite

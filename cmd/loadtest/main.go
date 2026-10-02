@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -103,10 +104,35 @@ func main() {
 		logger.Error("failed to set WEBHOOK_SECRET", slog.String("error", err.Error()))
 	}
 
-	vegetaPath := `C:\Users\senjumarru\gopath\bin\vegeta.exe`
+	vegetaPath := os.Getenv("VEGETA_PATH")
+	if vegetaPath == "" {
+		if path, err := exec.LookPath("vegeta"); err == nil {
+			vegetaPath = path
+		} else {
+			if gopath := os.Getenv("GOPATH"); gopath != "" {
+				candidate := filepath.Join(gopath, "bin", "vegeta.exe")
+				if _, statErr := os.Stat(candidate); statErr == nil {
+					vegetaPath = candidate
+				}
+			}
+			if vegetaPath == "" {
+				if out, envErr := exec.Command("go", "env", "GOPATH").Output(); envErr == nil {
+					candidate := filepath.Join(strings.TrimSpace(string(out)), "bin", "vegeta.exe")
+					if _, statErr := os.Stat(candidate); statErr == nil {
+						vegetaPath = candidate
+					}
+				}
+			}
+		}
+	}
+	if vegetaPath == "" {
+		vegetaPath = "vegeta"
+	}
 	if _, err := os.Stat(vegetaPath); err != nil {
-		fmt.Printf("Vegeta not found at %s: %v\n", vegetaPath, err)
-		os.Exit(1)
+		if _, pathErr := exec.LookPath(vegetaPath); pathErr != nil {
+			fmt.Printf("Vegeta not found (set VEGETA_PATH or ensure vegeta is in PATH): %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	tempDir, err := os.MkdirTemp("", "miniwallet-loadtest-*")

@@ -92,6 +92,9 @@ func TestLoad_DevValuesRejectedInNonDev(t *testing.T) {
 		"dev-webhook-secret-change-me",
 		"dev-secret-change-me",
 		"dev-jwt-secret-change-me-and-more-text",
+		"this-is-a-changeme-secret-that-is-long-enough",
+		"my-insecure-password-must-be-rejected-even-if-long",
+		"an-example-secret-that-exceeds-thirty-two-bytes",
 	}
 
 	for _, devKey := range devKeys {
@@ -117,6 +120,53 @@ func TestLoad_DevValuesRejectedInNonDev(t *testing.T) {
 	}
 }
 
+func TestLoad_FewerThan8DistinctCharsRejected(t *testing.T) {
+	clearEnv(t)
+	validKey := "a_very_secure_and_random_string_of_bytes_for_production_use_123"
+
+	lowEntropyKeys := []string{
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",                                 // 1 distinct
+		"abababababababababababababababab",                                 // 2 distinct
+		"12345671234567123456712345671234",                                 // 7 distinct
+		"----------------------------------------------------------------", // 1 distinct
+	}
+
+	for _, lowKey := range lowEntropyKeys {
+		t.Run("low_entropy_"+lowKey[:8], func(t *testing.T) {
+			clearEnv(t)
+			os.Setenv("JWT_SECRET", lowKey)
+			os.Setenv("WEBHOOK_SECRET", validKey)
+			_, err := config.Load()
+			if err == nil {
+				t.Fatalf("expected error for secret with < 8 distinct chars %q, got nil", lowKey)
+			}
+		})
+	}
+}
+
+func TestLoad_RandomHexAndBase64SecretsPass(t *testing.T) {
+	clearEnv(t)
+
+	// Настоящий 64-символьный hex (32 байта энтропии)
+	randomHexJWT := "d4e5f601a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9"
+	// Настоящий base64 секрет (44 символа, 32 байта)
+	randomBase64WH := "c2VjdXJlX3JhbmRvbV9iYXNlNjRfc2VjcmV0X3ZhbHVlXzEyMw=="
+
+	os.Setenv("JWT_SECRET", randomHexJWT)
+	os.Setenv("WEBHOOK_SECRET", randomBase64WH)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("expected random hex and base64 secrets to pass, got: %v", err)
+	}
+	if cfg.Dev {
+		t.Errorf("expected Dev to be false in non-dev mode, got true")
+	}
+	if cfg.JWTSecret != randomHexJWT || cfg.WebhookSecret != randomBase64WH {
+		t.Fatalf("loaded secrets mismatch: %+v", cfg)
+	}
+}
+
 func TestLoad_ExplicitDevModeAllowed(t *testing.T) {
 	clearEnv(t)
 	os.Setenv("APP_ENV", "dev")
@@ -125,6 +175,9 @@ func TestLoad_ExplicitDevModeAllowed(t *testing.T) {
 	cfg, err := config.Load()
 	if err != nil {
 		t.Fatalf("expected success in APP_ENV=dev mode, got error: %v", err)
+	}
+	if !cfg.Dev {
+		t.Errorf("expected Dev=true in APP_ENV=dev mode, got false")
 	}
 	if cfg.JWTSecret == "" || cfg.WebhookSecret == "" {
 		t.Fatal("expected dev secrets to be populated in dev mode")
@@ -142,6 +195,9 @@ func TestLoad_ValidProductionConfig(t *testing.T) {
 	cfg, err := config.Load()
 	if err != nil {
 		t.Fatalf("expected success with valid strong secrets, got: %v", err)
+	}
+	if cfg.Dev {
+		t.Errorf("expected Dev=false in production config, got true")
 	}
 	if cfg.JWTSecret != jwtKey || cfg.WebhookSecret != whKey {
 		t.Fatalf("secrets not matching: %+v", cfg)
