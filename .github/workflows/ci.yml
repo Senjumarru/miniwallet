@@ -13,6 +13,7 @@ jobs:
     runs-on: ubuntu-24.04
     env:
       GOTOOLCHAIN: local
+      APP_ENV: dev
     steps:
       - uses: actions/checkout@v4
         with:

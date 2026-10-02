@@ -2,6 +2,7 @@ package config_test
 
 import (
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,125 +31,126 @@ func clearEnv(t *testing.T) {
 	}
 }
 
-func TestLoad_DefaultDevConfig(t *testing.T) {
+// Invariant 7: Секреты без значений по умолчанию: отказ запуска при пустых, коротких
+// (<32 байт), dev-значениях или одинаковых секретах. Небезопасный режим только при явном APP_ENV=dev.
+
+func TestLoad_FailClosedByDefault(t *testing.T) {
 	clearEnv(t)
 
+	// Без APP_ENV=dev и без секретов config.Load ОБЯЗАН падать (fail-closed)
 	cfg, err := config.Load()
-	if err != nil {
-		t.Fatalf("expected nil err on default dev config, got: %v", err)
-	}
-	if cfg.JWTSecret != "dev-jwt-secret-change-me" {
-		t.Errorf("expected dev default JWTSecret, got %q", cfg.JWTSecret)
-	}
-	if cfg.WebhookSecret != "dev-webhook-secret-change-me" {
-		t.Errorf("expected dev default WebhookSecret, got %q", cfg.WebhookSecret)
-	}
-	if cfg.Port != "8080" {
-		t.Errorf("expected port 8080, got %q", cfg.Port)
+	if err == nil {
+		t.Fatalf("expected error by default when secrets are missing (fail-closed), got config: %+v", cfg)
 	}
 }
 
-func TestLoad_EmptySecretRejection(t *testing.T) {
-	t.Run("empty JWT_SECRET rejected", func(t *testing.T) {
-		clearEnv(t)
-		os.Setenv("JWT_SECRET", "")
+func TestLoad_ShortSecretRejected(t *testing.T) {
+	clearEnv(t)
+	// 31 байт (< 32 байт)
+	shortKey := "1234567890123456789012345678901"
+	validKey := "abcdefghijklmnopqrstuvwxyz1234567890_strong_key_1"
 
-		cfg, err := config.Load()
-		if err == nil {
-			t.Fatal("expected error when JWT_SECRET is empty string, got nil")
-		}
-		if cfg != nil {
-			t.Fatalf("expected nil config on error, got %+v", cfg)
+	t.Run("short JWT_SECRET rejected", func(t *testing.T) {
+		clearEnv(t)
+		os.Setenv("JWT_SECRET", shortKey)
+		os.Setenv("WEBHOOK_SECRET", validKey)
+		_, err := config.Load()
+		if err == nil || !strings.Contains(strings.ToLower(err.Error()), "short") {
+			t.Fatalf("expected error about short JWT_SECRET, got: %v", err)
 		}
 	})
 
-	t.Run("empty WEBHOOK_SECRET rejected", func(t *testing.T) {
+	t.Run("short WEBHOOK_SECRET rejected", func(t *testing.T) {
 		clearEnv(t)
-		os.Setenv("WEBHOOK_SECRET", "")
-
-		cfg, err := config.Load()
-		if err == nil {
-			t.Fatal("expected error when WEBHOOK_SECRET is empty string, got nil")
-		}
-		if cfg != nil {
-			t.Fatalf("expected nil config on error, got %+v", cfg)
+		os.Setenv("JWT_SECRET", validKey)
+		os.Setenv("WEBHOOK_SECRET", shortKey)
+		_, err := config.Load()
+		if err == nil || !strings.Contains(strings.ToLower(err.Error()), "short") {
+			t.Fatalf("expected error about short WEBHOOK_SECRET, got: %v", err)
 		}
 	})
 }
 
-func TestLoad_ProductionRequiresRealSecrets(t *testing.T) {
-	tests := []struct {
-		name        string
-		envKey      string
-		envVal      string
-		jwtSecret   string
-		whSecret    string
-		expectErr   bool
-		errContains string
-	}{
-		{
-			name:        "production with default jwt secret fails",
-			envKey:      "APP_ENV",
-			envVal:      "production",
-			jwtSecret:   "dev-jwt-secret-change-me",
-			whSecret:    "prod-wh-secret-123",
-			expectErr:   true,
-			errContains: "JWT_SECRET is required",
-		},
-		{
-			name:        "production with default webhook secret fails",
-			envKey:      "APP_ENV",
-			envVal:      "production",
-			jwtSecret:   "prod-jwt-secret-123",
-			whSecret:    "dev-webhook-secret-change-me",
-			expectErr:   true,
-			errContains: "WEBHOOK_SECRET is required",
-		},
-		{
-			name:        "require_secrets flag with default secret fails",
-			envKey:      "REQUIRE_SECRETS",
-			envVal:      "true",
-			jwtSecret:   "dev-jwt-secret-change-me",
-			whSecret:    "prod-wh-secret-123",
-			expectErr:   true,
-			errContains: "JWT_SECRET is required",
-		},
-		{
-			name:      "production with valid custom secrets succeeds",
-			envKey:    "APP_ENV",
-			envVal:    "production",
-			jwtSecret: "strong-secret-prod-1",
-			whSecret:  "strong-secret-prod-2",
-			expectErr: false,
-		},
+func TestLoad_IdenticalSecretsRejected(t *testing.T) {
+	clearEnv(t)
+	sameKey := "super_long_secret_key_used_for_both_jwt_and_webhook_123"
+	os.Setenv("JWT_SECRET", sameKey)
+	os.Setenv("WEBHOOK_SECRET", sameKey)
+
+	_, err := config.Load()
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "identical") {
+		t.Fatalf("expected error about identical secrets, got: %v", err)
+	}
+}
+
+func TestLoad_DevValuesRejectedInNonDev(t *testing.T) {
+	clearEnv(t)
+	validKey := "a_very_secure_and_random_string_of_bytes_for_production_use_123"
+
+	devKeys := []string{
+		"dev-jwt-secret-change-me",
+		"dev-webhook-secret-change-me",
+		"dev-secret-change-me",
+		"dev-jwt-secret-change-me-and-more-text",
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
+	for _, devKey := range devKeys {
+		t.Run("jwt_"+devKey, func(t *testing.T) {
 			clearEnv(t)
-			os.Setenv(tc.envKey, tc.envVal)
-			os.Setenv("JWT_SECRET", tc.jwtSecret)
-			os.Setenv("WEBHOOK_SECRET", tc.whSecret)
+			os.Setenv("JWT_SECRET", devKey)
+			os.Setenv("WEBHOOK_SECRET", validKey)
+			_, err := config.Load()
+			if err == nil {
+				t.Fatalf("expected error for dev secret %q in non-dev mode, got nil", devKey)
+			}
+		})
 
-			cfg, err := config.Load()
-			if tc.expectErr {
-				if err == nil {
-					t.Fatalf("expected error for case %q, got nil", tc.name)
-				}
-			} else {
-				if err != nil {
-					t.Fatalf("expected success for case %q, got err: %v", tc.name, err)
-				}
-				if cfg.JWTSecret != tc.jwtSecret || cfg.WebhookSecret != tc.whSecret {
-					t.Fatalf("config secrets mismatch: %+v", cfg)
-				}
+		t.Run("webhook_"+devKey, func(t *testing.T) {
+			clearEnv(t)
+			os.Setenv("JWT_SECRET", validKey)
+			os.Setenv("WEBHOOK_SECRET", devKey)
+			_, err := config.Load()
+			if err == nil {
+				t.Fatalf("expected error for dev secret %q in non-dev mode, got nil", devKey)
 			}
 		})
 	}
 }
 
+func TestLoad_ExplicitDevModeAllowed(t *testing.T) {
+	clearEnv(t)
+	os.Setenv("APP_ENV", "dev")
+
+	// В явном APP_ENV=dev запуск без секретов должен быть разрешён со значениями по умолчанию
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("expected success in APP_ENV=dev mode, got error: %v", err)
+	}
+	if cfg.JWTSecret == "" || cfg.WebhookSecret == "" {
+		t.Fatal("expected dev secrets to be populated in dev mode")
+	}
+}
+
+func TestLoad_ValidProductionConfig(t *testing.T) {
+	clearEnv(t)
+	jwtKey := "strong_production_jwt_secret_key_1234567890_min_32"
+	whKey := "strong_production_webhook_secret_key_1234567890_min_32"
+
+	os.Setenv("JWT_SECRET", jwtKey)
+	os.Setenv("WEBHOOK_SECRET", whKey)
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("expected success with valid strong secrets, got: %v", err)
+	}
+	if cfg.JWTSecret != jwtKey || cfg.WebhookSecret != whKey {
+		t.Fatalf("secrets not matching: %+v", cfg)
+	}
+}
+
 func TestLoad_CustomEnvVariables(t *testing.T) {
 	clearEnv(t)
+	os.Setenv("APP_ENV", "dev")
 	os.Setenv("PORT", "9090")
 	os.Setenv("DB_PATH", "test.db")
 	os.Setenv("PROVIDER_BASE_URL", "http://provider:9999")

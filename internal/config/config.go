@@ -2,8 +2,10 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -21,22 +23,41 @@ type Config struct {
 }
 
 func Load() (*Config, error) {
-	jwtSec := getEnv("JWT_SECRET", "dev-jwt-secret-change-me")
-	whSec := getEnv("WEBHOOK_SECRET", "dev-webhook-secret-change-me")
+	appEnv := os.Getenv("APP_ENV")
+	isDev := appEnv == "dev"
 
-	// Отказ запуска без секретов: явная пустая строка либо дефолтные dev-секреты в production
-	if val, ok := os.LookupEnv("JWT_SECRET"); ok && val == "" {
-		return nil, errors.New("JWT_SECRET cannot be empty")
-	}
-	if val, ok := os.LookupEnv("WEBHOOK_SECRET"); ok && val == "" {
-		return nil, errors.New("WEBHOOK_SECRET cannot be empty")
-	}
-	if os.Getenv("APP_ENV") == "production" || os.Getenv("REQUIRE_SECRETS") == "true" {
-		if os.Getenv("JWT_SECRET") == "" || os.Getenv("JWT_SECRET") == "dev-jwt-secret-change-me" {
-			return nil, errors.New("JWT_SECRET is required and must not use dev default")
+	var jwtSec, whSec string
+
+	if isDev {
+		jwtSec = getEnv("JWT_SECRET", "dev-jwt-secret-change-me-local-dev-only")
+		whSec = getEnv("WEBHOOK_SECRET", "dev-webhook-secret-change-me-local-dev-only")
+	} else {
+		// Инвариант 7: Секреты без значений по умолчанию: отказ запуска при пустых, коротких
+		// (<32 байт), dev-значениях или одинаковых секретах. Небезопасный режим только при явном APP_ENV=dev.
+		jwtSec = os.Getenv("JWT_SECRET")
+		if jwtSec == "" {
+			return nil, errors.New("JWT_SECRET is required and cannot be empty (fail-closed, set APP_ENV=dev for local development)")
 		}
-		if os.Getenv("WEBHOOK_SECRET") == "" || os.Getenv("WEBHOOK_SECRET") == "dev-webhook-secret-change-me" {
-			return nil, errors.New("WEBHOOK_SECRET is required and must not use dev default")
+		if len([]byte(jwtSec)) < 32 {
+			return nil, fmt.Errorf("JWT_SECRET is too short: must be at least 32 bytes (got %d)", len([]byte(jwtSec)))
+		}
+		if isDevSecret(jwtSec) {
+			return nil, errors.New("JWT_SECRET must not use insecure dev-value in non-dev environment")
+		}
+
+		whSec = os.Getenv("WEBHOOK_SECRET")
+		if whSec == "" {
+			return nil, errors.New("WEBHOOK_SECRET is required and cannot be empty (fail-closed, set APP_ENV=dev for local development)")
+		}
+		if len([]byte(whSec)) < 32 {
+			return nil, fmt.Errorf("WEBHOOK_SECRET is too short: must be at least 32 bytes (got %d)", len([]byte(whSec)))
+		}
+		if isDevSecret(whSec) {
+			return nil, errors.New("WEBHOOK_SECRET must not use insecure dev-value in non-dev environment")
+		}
+
+		if jwtSec == whSec {
+			return nil, errors.New("JWT_SECRET and WEBHOOK_SECRET must not be identical")
 		}
 	}
 
@@ -66,6 +87,17 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func isDevSecret(secret string) bool {
+	lower := strings.ToLower(secret)
+	if strings.Contains(lower, "change-me") ||
+		strings.Contains(lower, "dev-secret") ||
+		strings.Contains(lower, "dev-jwt-secret") ||
+		strings.Contains(lower, "dev-webhook-secret") {
+		return true
+	}
+	return false
 }
 
 func getEnv(key, defaultVal string) string {

@@ -8,24 +8,36 @@
 
 ## 🚀 Быстрый старт
 
+### Локальная разработка (dev-режим)
+Для локального запуска с автоматическими dev-секретами укажите `APP_ENV=dev`:
 ```bash
-# Запуск сервера
-go run ./cmd/server
+APP_ENV=dev go run ./cmd/server
 # Сервер слушает: http://localhost:8080
 # Метрики Prometheus: http://localhost:8080/metrics
 # Health / Readiness: http://localhost:8080/healthz, http://localhost:8080/readyz
+```
+
+### Запуск в продакшене (fail-closed, Инвариант 7)
+В не-dev окружении действует строгий режим **fail-closed**: запуск завершается ошибкой, если секреты не заданы, короче 32 байт, содержат dev-маркеры или совпадают между собой.
+```bash
+export JWT_SECRET="your-strong-production-jwt-secret-at-least-32-bytes"
+export WEBHOOK_SECRET="your-strong-production-webhook-secret-at-least-32-bytes"
+go run ./cmd/server
 ```
 
 ### Переменные окружения
 
 | Переменная | По умолчанию | Описание |
 | :--- | :--- | :--- |
+| `APP_ENV` | `""` | Окружение: при значении `dev` разрешён небезопасный режим с dev-секретами |
+| `JWT_SECRET` | *нет* | Секрет подписи JWT (обязателен, >= 32 байт, запрещены dev-значения при APP_ENV!=dev) |
+| `WEBHOOK_SECRET` | *нет* | Секрет HMAC-SHA256 вебхуков (обязателен, >= 32 байт, не должен совпадать с JWT_SECRET) |
+| `WEBHOOK_SECRET_OLD` | `""` | Предыдущий секрет (для бесшовной ротации без даунтайма) |
 | `PORT` | `8080` | Порт HTTP-сервера |
 | `DB_PATH` | `wallet.db` | Путь к файлу SQLite |
-| `JWT_SECRET` | `dev-secret-change-me` | Ключ подписи JWT токенов |
-| `WEBHOOK_SECRET` | `whsec-dev-secret-12345` | Секрет HMAC-SHA256 подписи вебхуков |
-| `WEBHOOK_SECRET_OLD` | `""` | Предыдущий секрет (для бесшовной ротации без даунтайма) |
-| `PROVIDER_BASE_URL` | `http://localhost:9000` | URL внешнего платёжного шлюза (PSP) |
+| `PROVIDER_BASE_URL` | `http://localhost:8081` | URL внешнего платёжного шлюза (PSP) |
+| `PROVIDER_TIMEOUT_MS` | `5000` | Таймаут вызовов провайдера в миллисекундах |
+| `MAX_RETRY_ATTEMPTS` | `4` | Максимальное число повторов запросов к PSP |
 | `LOG_LEVEL` | `info` | Уровень логирования: `debug`, `info`, `warn`, `error` |
 
 ---

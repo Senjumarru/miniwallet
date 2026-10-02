@@ -93,6 +93,16 @@ func main() {
 	fmt.Println("      MINIWALLET ADVERSARIAL LOAD TESTING SUITE (VEGETA)         ")
 	fmt.Println("=================================================================")
 
+	if err := os.Setenv("APP_ENV", "dev"); err != nil {
+		logger.Error("failed to set APP_ENV", slog.String("error", err.Error()))
+	}
+	if err := os.Setenv("JWT_SECRET", jwtSecret); err != nil {
+		logger.Error("failed to set JWT_SECRET", slog.String("error", err.Error()))
+	}
+	if err := os.Setenv("WEBHOOK_SECRET", webhookSecret); err != nil {
+		logger.Error("failed to set WEBHOOK_SECRET", slog.String("error", err.Error()))
+	}
+
 	vegetaPath := `C:\Users\senjumarru\gopath\bin\vegeta.exe`
 	if _, err := os.Stat(vegetaPath); err != nil {
 		fmt.Printf("Vegeta not found at %s: %v\n", vegetaPath, err)
