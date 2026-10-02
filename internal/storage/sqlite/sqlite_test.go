@@ -243,6 +243,31 @@ func TestPaymentRepository_ErrUniqueViolation(t *testing.T) {
 	if errors.As(errCheck, &uniqCheckErr) {
 		t.Fatalf("check constraint violation must NOT be ErrUniqueViolation, got %v", errCheck)
 	}
+
+	// 5. NOT NULL constraint violation (NULL for idempotency_key) must NOT return ErrUniqueViolation
+	_, errNN := store.DB().ExecContext(ctx, `
+		INSERT INTO payments (user_id, order_id, amount_minor, currency, status, idempotency_key, request_hash)
+		VALUES (1, 20, 1000, 'KZT', 'pending', NULL, 'hash')
+	`)
+	if errNN == nil {
+		t.Fatal("expected error on NOT NULL violation, got nil")
+	}
+	classifiedNN := sqlite.ClassifySQLiteError(errNN)
+	var uniqNNErr *domain.ErrUniqueViolation
+	if errors.As(classifiedNN, &uniqNNErr) {
+		t.Fatalf("NOT NULL violation must NOT be ErrUniqueViolation (Invariant 8 whitelist), got %v", classifiedNN)
+	}
+
+	// 6. PRIMARY KEY violation (duplicate user id) must return ErrUniqueViolation (white list)
+	_, errPK := store.DB().ExecContext(ctx, `INSERT INTO users (id, email) VALUES (1, 'duplicate_pk@example.kz')`)
+	if errPK == nil {
+		t.Fatal("expected error on PRIMARY KEY duplicate, got nil")
+	}
+	classifiedPK := sqlite.ClassifySQLiteError(errPK)
+	var uniqPKErr *domain.ErrUniqueViolation
+	if !errors.As(classifiedPK, &uniqPKErr) {
+		t.Fatalf("PRIMARY KEY duplicate must return ErrUniqueViolation (Invariant 8 whitelist), got %v", classifiedPK)
+	}
 }
 
 func TestPaymentRepository_UpdateStatusConflict(t *testing.T) {

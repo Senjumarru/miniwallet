@@ -14,27 +14,39 @@ import (
 	"github.com/Senjumarru/miniwallet/internal/domain"
 )
 
+// ClassifySQLiteError classifies a SQLite error, mapping ONLY unique/primary key violations
+// to domain.ErrUniqueViolation (white list per Invariant 8).
+func ClassifySQLiteError(err error) error {
+	return classifySQLiteError(err)
+}
+
 func classifySQLiteError(err error) error {
 	var sqliteErr *sqlite.Error
 	if errors.As(err, &sqliteErr) {
 		code := sqliteErr.Code()
-		// Внешний ключ и CHECK ограничения НЕ являются нарушением уникальности
-		if code == sqlite3.SQLITE_CONSTRAINT_CHECK || code == sqlite3.SQLITE_CONSTRAINT_FOREIGNKEY {
+		errMsg := sqliteErr.Error()
+
+		// Инвариант 8: ErrUniqueViolation только для UNIQUE/PRIMARYKEY (белый список).
+		// Прочие ошибки БД (NOT NULL, CHECK, FOREIGN KEY и т.д.) это внутренние ошибки,
+		// а не "заказ занят".
+		isUnique := code == sqlite3.SQLITE_CONSTRAINT_UNIQUE ||
+			code == sqlite3.SQLITE_CONSTRAINT_PRIMARYKEY ||
+			(code == sqlite3.SQLITE_CONSTRAINT && (strings.Contains(errMsg, "UNIQUE") || strings.Contains(errMsg, "PRIMARY KEY")))
+
+		if !isUnique {
 			return err
 		}
-		if code == sqlite3.SQLITE_CONSTRAINT_UNIQUE || code&0xff == sqlite3.SQLITE_CONSTRAINT {
-			errMsg := sqliteErr.Error()
-			if strings.Contains(errMsg, "idx_payments_order_single_succeeded") {
-				return &domain.ErrUniqueViolation{Constraint: "order_succeeded"}
-			}
-			if strings.Contains(errMsg, "idx_payments_order_single_pending") || strings.Contains(errMsg, "payments.order_id") {
-				return &domain.ErrUniqueViolation{Constraint: "order_pending"}
-			}
-			if strings.Contains(errMsg, "uq_user_idempotency") || strings.Contains(errMsg, "payments.user_id") || strings.Contains(errMsg, "payments.idempotency_key") {
-				return &domain.ErrUniqueViolation{Constraint: "idempotency_key"}
-			}
-			return &domain.ErrUniqueViolation{Constraint: "unknown"}
+
+		if strings.Contains(errMsg, "idx_payments_order_single_succeeded") {
+			return &domain.ErrUniqueViolation{Constraint: "order_succeeded"}
 		}
+		if strings.Contains(errMsg, "idx_payments_order_single_pending") || strings.Contains(errMsg, "payments.order_id") {
+			return &domain.ErrUniqueViolation{Constraint: "order_pending"}
+		}
+		if strings.Contains(errMsg, "uq_user_idempotency") || strings.Contains(errMsg, "payments.user_id") || strings.Contains(errMsg, "payments.idempotency_key") {
+			return &domain.ErrUniqueViolation{Constraint: "idempotency_key"}
+		}
+		return &domain.ErrUniqueViolation{Constraint: "unknown"}
 	}
 	return err
 }
