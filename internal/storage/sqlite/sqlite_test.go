@@ -207,6 +207,42 @@ func TestPaymentRepository_ErrUniqueViolation(t *testing.T) {
 	if !errors.As(errOrder, &uniqOrderErr) || uniqOrderErr.Constraint != "order_pending" {
 		t.Fatalf("expected *domain.ErrUniqueViolation with Constraint 'order_pending', got %v", errOrder)
 	}
+
+	// 3. Foreign key violation (non-existent order) must NOT return ErrUniqueViolation
+	pFK := &domain.Payment{
+		UserID:         1,
+		OrderID:        99999, // non-existent order
+		AmountMinor:    10000,
+		Currency:       "KZT",
+		IdempotencyKey: "key-fk-test-unique",
+		RequestHash:    "hash4",
+	}
+	errFK := payRepo.CreatePending(ctx, pFK)
+	if errFK == nil {
+		t.Fatal("expected error on foreign key violation, got nil")
+	}
+	var uniqFKErr *domain.ErrUniqueViolation
+	if errors.As(errFK, &uniqFKErr) {
+		t.Fatalf("foreign key violation must NOT be ErrUniqueViolation, got %v", errFK)
+	}
+
+	// 4. CHECK constraint violation (amount_minor <= 0) must NOT return ErrUniqueViolation
+	pCheck := &domain.Payment{
+		UserID:         1,
+		OrderID:        20,
+		AmountMinor:    -500, // violates CHECK (amount_minor > 0)
+		Currency:       "KZT",
+		IdempotencyKey: "key-check-test-unique",
+		RequestHash:    "hash5",
+	}
+	errCheck := payRepo.CreatePending(ctx, pCheck)
+	if errCheck == nil {
+		t.Fatal("expected error on check constraint violation, got nil")
+	}
+	var uniqCheckErr *domain.ErrUniqueViolation
+	if errors.As(errCheck, &uniqCheckErr) {
+		t.Fatalf("check constraint violation must NOT be ErrUniqueViolation, got %v", errCheck)
+	}
 }
 
 func TestPaymentRepository_UpdateStatusConflict(t *testing.T) {

@@ -5,6 +5,7 @@ go 1.27.1
 require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/prometheus/client_golang v1.24.1
+	go.uber.org/goleak v1.3.0
 	modernc.org/sqlite v1.60.0
 )
 

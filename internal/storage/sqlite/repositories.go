@@ -18,6 +18,10 @@ func classifySQLiteError(err error) error {
 	var sqliteErr *sqlite.Error
 	if errors.As(err, &sqliteErr) {
 		code := sqliteErr.Code()
+		// Внешний ключ и CHECK ограничения НЕ являются нарушением уникальности
+		if code == sqlite3.SQLITE_CONSTRAINT_CHECK || code == sqlite3.SQLITE_CONSTRAINT_FOREIGNKEY {
+			return err
+		}
 		if code == sqlite3.SQLITE_CONSTRAINT_UNIQUE || code&0xff == sqlite3.SQLITE_CONSTRAINT {
 			errMsg := sqliteErr.Error()
 			if strings.Contains(errMsg, "idx_payments_order_single_succeeded") {
