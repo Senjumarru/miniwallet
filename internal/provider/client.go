@@ -20,9 +20,10 @@ import (
 )
 
 var (
-	ErrProviderUnavailable = errors.New("payment provider unavailable")
-	ErrProviderClientError = errors.New("payment provider rejected request (client error)")
-	ErrProviderFatal       = errors.New("fatal provider error")
+	ErrProviderUnavailable    = errors.New("payment provider unavailable")
+	ErrProviderClientError    = errors.New("payment provider rejected request (client error)")
+	ErrProviderFatal          = errors.New("fatal provider error")
+	ErrProviderPaymentUnknown = errors.New("provider payment unknown (404)")
 
 	// Однозначный отказ (4xx кроме 429)
 	ErrDefinitiveRejection = errors.New("provider definitive rejection (4xx)")
@@ -35,9 +36,9 @@ func IsDefinitiveRejection(err error) bool {
 	return errors.Is(err, ErrDefinitiveRejection) || errors.Is(err, ErrProviderClientError)
 }
 
-// IsAmbiguousOutcome проверяет, является ли исход вызова неоднозначным (таймаут, 5xx, разрыв).
+// IsAmbiguousOutcome проверяет, является ли исход вызова неоднозначным (таймаут, 5xx, 404, разрыв).
 func IsAmbiguousOutcome(err error) bool {
-	return errors.Is(err, ErrAmbiguousOutcome) || errors.Is(err, ErrProviderUnavailable)
+	return errors.Is(err, ErrAmbiguousOutcome) || errors.Is(err, ErrProviderUnavailable) || errors.Is(err, ErrProviderPaymentUnknown)
 }
 
 type HTTPClient interface {
@@ -334,7 +335,7 @@ func (c *Client) GetPaymentStatus(ctx context.Context, providerPaymentID string)
 		if c.cb != nil {
 			c.cb.OnSuccess()
 		}
-		return domain.PaymentStatusFailed, nil
+		return "", ErrProviderPaymentUnknown
 	}
 	if resp.StatusCode != http.StatusOK {
 		if c.cb != nil {

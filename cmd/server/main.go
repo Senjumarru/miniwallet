@@ -106,11 +106,13 @@ func run() error {
 			Batch:    50,
 		},
 	)
-	go reconciler.Start(ctx)
 
 	promMetrics := metrics.NewMetrics(nil)
 	providerClient.SetMetrics(promMetrics)
 	paymentSvc.SetMetrics(promMetrics)
+	reconciler.SetMetrics(promMetrics)
+
+	go reconciler.Start(ctx)
 
 	handler := httpapi.NewHandler(paymentSvc, logger, cfg.JWTSecret,
 		httpapi.WithReadyChecker(store.DB().PingContext),

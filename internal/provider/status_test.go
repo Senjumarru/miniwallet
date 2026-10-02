@@ -2,6 +2,7 @@ package provider_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -62,7 +63,7 @@ func TestClient_GetPaymentStatus(t *testing.T) {
 		}
 	})
 
-	t.Run("404 Not Found returns PaymentStatusFailed without error", func(t *testing.T) {
+	t.Run("404 Not Found returns ErrProviderPaymentUnknown", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusNotFound)
 		}))
@@ -79,11 +80,14 @@ func TestClient_GetPaymentStatus(t *testing.T) {
 		)
 
 		st, err := client.GetPaymentStatus(context.Background(), "ch_not_found")
-		if err != nil {
-			t.Fatalf("expected nil error on 404, got: %v", err)
+		if err == nil {
+			t.Fatal("expected ErrProviderPaymentUnknown on 404, got nil error")
 		}
-		if st != domain.PaymentStatusFailed {
-			t.Errorf("expected status %s on 404, got %s", domain.PaymentStatusFailed, st)
+		if !errors.Is(err, provider.ErrProviderPaymentUnknown) {
+			t.Fatalf("expected ErrProviderPaymentUnknown on 404, got: %v", err)
+		}
+		if st != "" {
+			t.Errorf("expected empty status on 404, got %s", st)
 		}
 	})
 

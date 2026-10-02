@@ -3,11 +3,13 @@ package service
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/Senjumarru/miniwallet/internal/domain"
+	"github.com/Senjumarru/miniwallet/internal/metrics"
 	"github.com/Senjumarru/miniwallet/internal/provider"
 )
 
@@ -25,6 +27,7 @@ type Reconciler struct {
 	provider      provider.PaymentProvider
 	logger        *slog.Logger
 	clock         domain.Clock
+	metrics       *metrics.Metrics
 	cfg           ReconcilerConfig
 }
 
@@ -60,6 +63,10 @@ func NewReconciler(
 
 func (r *Reconciler) SetClock(clock domain.Clock) {
 	r.clock = clock
+}
+
+func (r *Reconciler) SetMetrics(m *metrics.Metrics) {
+	r.metrics = m
 }
 
 func (r *Reconciler) now() time.Time {
@@ -137,6 +144,17 @@ func (r *Reconciler) reconcilePayment(ctx context.Context, p *domain.Payment) er
 
 	provStatus, err := r.provider.GetPaymentStatus(ctx, lookupID)
 	if err != nil {
+		if errors.Is(err, provider.ErrProviderPaymentUnknown) {
+			r.logger.WarnContext(ctx, "reconciliation: payment unknown to provider (404), keeping pending",
+				slog.Int64("payment_id", p.ID),
+				slog.Int64("order_id", p.OrderID),
+				slog.String("lookup_id", lookupID),
+			)
+			if r.metrics != nil {
+				r.metrics.ReconcilerUnknownPaymentsTotal.Inc()
+			}
+			return nil
+		}
 		// Ошибка обращения к провайдеру: НЕ переводим в failed, оставляем pending для следующей сверки
 		return fmt.Errorf("check provider status for %s: %w", lookupID, err)
 	}
