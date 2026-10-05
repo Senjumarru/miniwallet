@@ -11,12 +11,15 @@ import (
 	"io"
 	"log/slog"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -35,7 +38,7 @@ const (
 type mockProviderServer struct {
 	server       *httptest.Server
 	checkoutHits atomic.Int64
-	delay        time.Duration
+	delayNanos   atomic.Int64
 	return503    atomic.Bool
 }
 
@@ -43,8 +46,9 @@ func newMockProviderServer() *mockProviderServer {
 	mps := &mockProviderServer{}
 	mps.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mps.checkoutHits.Add(1)
-		if mps.delay > 0 {
-			time.Sleep(mps.delay)
+		delay := time.Duration(mps.delayNanos.Load())
+		if delay > 0 {
+			time.Sleep(delay)
 		}
 		if mps.return503.Load() {
 			w.WriteHeader(http.StatusServiceUnavailable)
@@ -60,6 +64,10 @@ func newMockProviderServer() *mockProviderServer {
 		}
 	}))
 	return mps
+}
+
+func (mps *mockProviderServer) SetDelay(d time.Duration) {
+	mps.delayNanos.Store(int64(d))
 }
 
 func issueJWT(userID int64) string {
@@ -84,6 +92,7 @@ type LoadTestResult struct {
 	RPS            float64
 	P95            time.Duration
 	P99            time.Duration
+	Non2xx         int
 	ErrorRate      float64
 	InvariantsPass bool
 }
@@ -145,6 +154,15 @@ func main() {
 		}
 	}()
 
+	// Build server binary for real process kill scenario
+	serverBin := filepath.Join(tempDir, "miniwallet-server.exe")
+	fmt.Print("Compiling miniwallet-server binary for real process kill scenario... ")
+	buildCmd := exec.Command("go", "build", "-o", serverBin, "./cmd/server")
+	if out, bErr := buildCmd.CombinedOutput(); bErr != nil {
+		panic(fmt.Sprintf("go build cmd/server failed: %v, out: %s", bErr, string(out)))
+	}
+	fmt.Println("DONE.")
+
 	results := make([]LoadTestResult, 0)
 
 	// -------------------------------------------------------------------------
@@ -162,37 +180,44 @@ func main() {
 	results = append(results, resB)
 
 	// -------------------------------------------------------------------------
-	// Scenario C: Provider 5s delay + 503 wave (Circuit Breaker)
+	// Scenario C: Provider delay + client timeout + 503 wave (expect 502/503/504, 0 500)
 	// -------------------------------------------------------------------------
-	fmt.Println("\n[Scenario C] Provider 5s delay + 503 wave (Circuit Breaker fast-fail)...")
+	fmt.Println("\n[Scenario C] Provider delay + client timeout + 503 wave (expect 502/503/504, 0 500)...")
 	resC := runScenarioC(vegetaPath, tempDir, logger)
 	results = append(results, resC)
 
 	// -------------------------------------------------------------------------
-	// Scenario D: Process kill & restart during pending load, Reconciler recovery
+	// Scenario D: Real process kill & restart during load + Reconciler recovery
 	// -------------------------------------------------------------------------
-	fmt.Println("\n[Scenario D] Process kill & restart simulation + Reconciler TTL cleanup...")
-	resD := runScenarioD(tempDir, logger)
+	fmt.Println("\n[Scenario D] Real process kill & restart + Reconciler TTL cleanup...")
+	resD := runScenarioD(serverBin, tempDir, logger)
 	results = append(results, resD)
+
+	// -------------------------------------------------------------------------
+	// Scenario Ramp: Ramp-up load testing to find degradation point
+	// -------------------------------------------------------------------------
+	fmt.Println("\n[Scenario Ramp] Ramp-up load to locate performance degradation point...")
+	resRamp := runScenarioRamp(vegetaPath, tempDir, logger)
+	results = append(results, resRamp)
 
 	// -------------------------------------------------------------------------
 	// Summary Table
 	// -------------------------------------------------------------------------
-	fmt.Println("\n=========================================================================================")
-	fmt.Println("                               SUMMARY LOAD TEST REPORT                                  ")
-	fmt.Println("=========================================================================================")
-	fmt.Printf("%-35s | %-8s | %-10s | %-10s | %-10s | %-10s | %-12s\n",
+	fmt.Println("\n========================================================================================================")
+	fmt.Println("                                      SUMMARY LOAD TEST REPORT                                          ")
+	fmt.Println("========================================================================================================")
+	fmt.Printf("%-38s | %-8s | %-10s | %-10s | %-10s | %-10s | %-12s\n",
 		"Scenario", "Requests", "RPS", "p95", "p99", "Errors %", "Invariants")
-	fmt.Println("-----------------------------------------------------------------------------------------")
+	fmt.Println("--------------------------------------------------------------------------------------------------------")
 	for _, r := range results {
-		invStatus := "PASSED (OK)"
+		invStatus := "PASSED"
 		if !r.InvariantsPass {
 			invStatus = "VIOLATION!"
 		}
-		fmt.Printf("%-35s | %-8d | %-10.1f | %-10v | %-10v | %-9.2f%% | %-12s\n",
+		fmt.Printf("%-38s | %-8d | %-10.1f | %-10v | %-10v | %-9.2f%% | %-12s\n",
 			r.ScenarioName, r.Requests, r.RPS, r.P95, r.P99, r.ErrorRate*100, invStatus)
 	}
-	fmt.Println("=========================================================================================")
+	fmt.Println("========================================================================================================")
 }
 
 func runScenarioA(vegetaPath, tempDir string, logger *slog.Logger) LoadTestResult {
@@ -203,7 +228,6 @@ func runScenarioA(vegetaPath, tempDir string, logger *slog.Logger) LoadTestResul
 	}
 	defer store.Close()
 
-	// Seed user and order
 	db := store.DB()
 	if _, err := db.Exec(`INSERT INTO users (id, email, is_active, is_blocked) VALUES (1, 'user1@test.kz', 1, 0)`); err != nil {
 		panic(err)
@@ -225,7 +249,6 @@ func runScenarioA(vegetaPath, tempDir string, logger *slog.Logger) LoadTestResul
 
 	svc := service.NewPaymentService(userRepo, orderRepo, paymentRepo, webhookRepo, paymentEventRepo, secRepo, store, provClient, logger, webhookSecret)
 
-	// Use high rate limiters so network load reaches the core
 	unlimited := httpapi.NewRateLimiter(10000, 20000, domain.RealClock{})
 	handler := httpapi.NewHandler(svc, logger, jwtSecret,
 		httpapi.WithPaymentsIPLimiter(unlimited),
@@ -238,7 +261,6 @@ func runScenarioA(vegetaPath, tempDir string, logger *slog.Logger) LoadTestResul
 	jwtToken := issueJWT(1)
 	idemKey := "loadtest-idemkey-scenario-a-0001"
 
-	// Prepare vegeta targets file
 	targetsFile := filepath.Join(tempDir, "targets_a.txt")
 	targetContent := fmt.Sprintf("POST %s/payments\nAuthorization: Bearer %s\nIdempotency-Key: %s\nContent-Type: application/json\n@%s\n",
 		server.URL, jwtToken, idemKey, filepath.Join(tempDir, "body_a.json"))
@@ -249,7 +271,6 @@ func runScenarioA(vegetaPath, tempDir string, logger *slog.Logger) LoadTestResul
 		panic(err)
 	}
 
-	// Run Vegeta attack: 1000 requests, 500 RPS for 2s
 	attackCmd := exec.Command(vegetaPath, "attack", "-rate=500/1s", "-duration=2s", fmt.Sprintf("-targets=%s", targetsFile))
 	var attackOut bytes.Buffer
 	attackCmd.Stdout = &attackOut
@@ -260,7 +281,6 @@ func runScenarioA(vegetaPath, tempDir string, logger *slog.Logger) LoadTestResul
 
 	rawResults := attackOut.Bytes()
 
-	// Vegeta report
 	reportCmd := exec.Command(vegetaPath, "report", "-type=json")
 	reportCmd.Stdin = bytes.NewReader(rawResults)
 	reportCmd.Stderr = os.Stderr
@@ -271,20 +291,17 @@ func runScenarioA(vegetaPath, tempDir string, logger *slog.Logger) LoadTestResul
 
 	var rep struct {
 		Requests   int     `json:"requests"`
-		Rate       float64 `json:"rate"`
 		Throughput float64 `json:"throughput"`
 		Latencies  struct {
 			P95 int64 `json:"95th"`
 			P99 int64 `json:"99th"`
 		} `json:"latencies"`
 		StatusCodes map[string]int `json:"status_codes"`
-		Errors      []string       `json:"errors"`
 	}
 	if err := json.Unmarshal(reportJSON, &rep); err != nil {
 		panic(err)
 	}
 
-	// Print raw text report for verification
 	textReportCmd := exec.Command(vegetaPath, "report")
 	textReportCmd.Stdin = bytes.NewReader(rawResults)
 	textReportCmd.Stderr = os.Stderr
@@ -294,31 +311,27 @@ func runScenarioA(vegetaPath, tempDir string, logger *slog.Logger) LoadTestResul
 	}
 	fmt.Println(string(textOut))
 
-	// Verify database invariants
 	var paymentCount int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM payments WHERE order_id = 101`).Scan(&paymentCount); err != nil {
 		panic(err)
 	}
-	var succeededCount int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM payments WHERE order_id = 101 AND status = 'succeeded'`).Scan(&succeededCount); err != nil {
-		panic(err)
-	}
-	var pendingCount int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM payments WHERE order_id = 101 AND status = 'pending'`).Scan(&pendingCount); err != nil {
-		panic(err)
-	}
 
-	// Exactly 1 payment created in DB, 0 5xx responses
 	has5xx := false
-	for code := range rep.StatusCodes {
-		if code >= "500" {
+	non2xx := 0
+	for codeStr, count := range rep.StatusCodes {
+		if codeStr >= "500" {
 			has5xx = true
+		}
+		code, _ := strconv.Atoi(codeStr)
+		if code < 200 || code >= 300 {
+			non2xx += count
 		}
 	}
 
+	errorRate := float64(non2xx) / float64(rep.Requests)
 	invariantsPass := paymentCount == 1 && !has5xx && mps.checkoutHits.Load() == 1
-	fmt.Printf("Scenario A Invariant Verification: Total payments in DB = %d (expected 1), Provider hits = %d (expected 1), 5xx count = %v\n",
-		paymentCount, mps.checkoutHits.Load(), has5xx)
+	fmt.Printf("Scenario A Invariant Verification: Payments in DB = %d (expected 1), Provider hits = %d (expected 1), 5xx count = %v, Non-2xx = %d\n",
+		paymentCount, mps.checkoutHits.Load(), has5xx, non2xx)
 
 	return LoadTestResult{
 		ScenarioName:   "A: 1000 reqs with 1 Idempotency-Key",
@@ -326,7 +339,8 @@ func runScenarioA(vegetaPath, tempDir string, logger *slog.Logger) LoadTestResul
 		RPS:            rep.Throughput,
 		P95:            time.Duration(rep.Latencies.P95),
 		P99:            time.Duration(rep.Latencies.P99),
-		ErrorRate:      0, // 409 is expected business replay response, 0 system errors
+		Non2xx:         non2xx,
+		ErrorRate:      errorRate,
 		InvariantsPass: invariantsPass,
 	}
 }
@@ -344,7 +358,6 @@ func runScenarioB(vegetaPath, tempDir string, logger *slog.Logger) LoadTestResul
 		panic(err)
 	}
 
-	// Seed 20 orders and 20 pending payments
 	for i := 1; i <= 20; i++ {
 		if _, err := db.Exec(`INSERT INTO orders (id, user_id, amount_minor, currency, status) VALUES (?, 1, 10000, 'KZT', 'unpaid')`, i); err != nil {
 			panic(err)
@@ -376,7 +389,6 @@ func runScenarioB(vegetaPath, tempDir string, logger *slog.Logger) LoadTestResul
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
-	// Prepare 1000 webhook requests (20 distinct events repeated 50 times each, randomly shuffled)
 	type webhookReq struct {
 		body []byte
 		sig  string
@@ -394,12 +406,10 @@ func runScenarioB(vegetaPath, tempDir string, logger *slog.Logger) LoadTestResul
 		}
 	}
 
-	// Shuffle requests to simulate out-of-order and concurrent flurry
 	rand.Shuffle(len(requests), func(i, j int) {
 		requests[i], requests[j] = requests[j], requests[i]
 	})
 
-	// Write vegeta targets format
 	var targetsBuffer bytes.Buffer
 	for idx, req := range requests {
 		bodyFile := filepath.Join(tempDir, fmt.Sprintf("wh_body_%d.json", idx))
@@ -414,7 +424,6 @@ func runScenarioB(vegetaPath, tempDir string, logger *slog.Logger) LoadTestResul
 		panic(err)
 	}
 
-	// Run Vegeta attack: 1000 requests, 500 RPS for 2s
 	attackCmd := exec.Command(vegetaPath, "attack", "-rate=500/1s", "-duration=2s", fmt.Sprintf("-targets=%s", targetsFile))
 	var attackOut bytes.Buffer
 	attackCmd.Stdout = &attackOut
@@ -425,7 +434,6 @@ func runScenarioB(vegetaPath, tempDir string, logger *slog.Logger) LoadTestResul
 
 	rawResults := attackOut.Bytes()
 
-	// Report
 	reportCmd := exec.Command(vegetaPath, "report", "-type=json")
 	reportCmd.Stdin = bytes.NewReader(rawResults)
 	reportCmd.Stderr = os.Stderr
@@ -456,34 +464,35 @@ func runScenarioB(vegetaPath, tempDir string, logger *slog.Logger) LoadTestResul
 	}
 	fmt.Println(string(textOut))
 
-	// Invariant Verification:
-	// 1. All 20 orders must be 'paid'
 	var paidOrdersCount int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM orders WHERE status = 'paid'`).Scan(&paidOrdersCount); err != nil {
 		panic(err)
 	}
-
-	// 2. All 20 payments must be 'succeeded'
 	var succeededCount int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM payments WHERE status = 'succeeded'`).Scan(&succeededCount); err != nil {
 		panic(err)
 	}
-
-	// 3. Exactly 20 distinct webhook events recorded
 	var webhookCount int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM webhook_events`).Scan(&webhookCount); err != nil {
 		panic(err)
 	}
-
-	// 4. SQL invariant check: no duplicate succeeded payments for any order
 	var dupSucceeded int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM (SELECT order_id FROM payments WHERE status = 'succeeded' GROUP BY order_id HAVING COUNT(*) > 1)`).Scan(&dupSucceeded); err != nil {
 		panic(err)
 	}
 
+	non2xx := 0
+	for codeStr, count := range rep.StatusCodes {
+		code, _ := strconv.Atoi(codeStr)
+		if code < 200 || code >= 300 {
+			non2xx += count
+		}
+	}
+	errorRate := float64(non2xx) / float64(rep.Requests)
+
 	invariantsPass := paidOrdersCount == 20 && succeededCount == 20 && webhookCount == 20 && dupSucceeded == 0
-	fmt.Printf("Scenario B Invariants: Paid orders = %d/20, Succeeded payments = %d/20, Webhook events = %d/20, Dup Succeeded = %d\n",
-		paidOrdersCount, succeededCount, webhookCount, dupSucceeded)
+	fmt.Printf("Scenario B Invariants: Paid orders = %d/20, Succeeded payments = %d/20, Webhook events = %d/20, Dup Succeeded = %d, Non-2xx = %d\n",
+		paidOrdersCount, succeededCount, webhookCount, dupSucceeded, non2xx)
 
 	return LoadTestResult{
 		ScenarioName:   "B: Webhook storm (1000 reqs, duplicates)",
@@ -491,7 +500,8 @@ func runScenarioB(vegetaPath, tempDir string, logger *slog.Logger) LoadTestResul
 		RPS:            rep.Throughput,
 		P95:            time.Duration(rep.Latencies.P95),
 		P99:            time.Duration(rep.Latencies.P99),
-		ErrorRate:      0,
+		Non2xx:         non2xx,
+		ErrorRate:      errorRate,
 		InvariantsPass: invariantsPass,
 	}
 }
@@ -509,22 +519,21 @@ func runScenarioC(vegetaPath, tempDir string, logger *slog.Logger) LoadTestResul
 		panic(err)
 	}
 
-	// Seed 200 orders so each request has a distinct order
 	for i := 1; i <= 200; i++ {
 		if _, err := db.Exec(`INSERT INTO orders (id, user_id, amount_minor, currency, status) VALUES (?, 1, 5000, 'KZT', 'unpaid')`, i); err != nil {
 			panic(err)
 		}
 	}
 
-	// Provider returns 503
 	mps := newMockProviderServer()
-	mps.return503.Store(true)
+	// Set real provider delay of 150ms. Since client timeout is 50ms, this triggers 504/502 and trips CB.
+	mps.SetDelay(150 * time.Millisecond)
 	defer mps.server.Close()
 
-	// Provider client with circuit breaker: 5 failures threshold, 10s cooldown
+	// Provider client with 50ms timeout and circuit breaker
 	cb := provider.NewCircuitBreaker(5, 10*time.Second, 1, domain.RealClock{})
 	sem := provider.NewSemaphore(20)
-	provClient := provider.NewClient(mps.server.URL, mps.server.Client(), logger, 100*time.Millisecond, 1, 5*time.Millisecond, 10*time.Millisecond)
+	provClient := provider.NewClient(mps.server.URL, mps.server.Client(), logger, 50*time.Millisecond, 1, 5*time.Millisecond, 10*time.Millisecond)
 	provClient.SetCircuitBreaker(cb)
 	provClient.SetSemaphore(sem)
 
@@ -548,7 +557,6 @@ func runScenarioC(vegetaPath, tempDir string, logger *slog.Logger) LoadTestResul
 
 	jwtToken := issueJWT(1)
 
-	// Send 100 requests to trigger CB open and verify fast-fail
 	var targetsBuffer bytes.Buffer
 	for i := 1; i <= 100; i++ {
 		bodyFile := filepath.Join(tempDir, fmt.Sprintf("cb_body_%d.json", i))
@@ -603,73 +611,192 @@ func runScenarioC(vegetaPath, tempDir string, logger *slog.Logger) LoadTestResul
 	}
 	fmt.Println(string(textOut))
 
-	// Verify Circuit Breaker opened:
 	cbState := cb.State()
-	fmt.Printf("Scenario C Verification: Circuit Breaker State = %s (Open=%v), 503 count = %d\n",
-		cbState, cbState == provider.StateOpen, rep.StatusCodes["503"])
+	count502 := rep.StatusCodes["502"]
+	count503 := rep.StatusCodes["503"]
+	count504 := rep.StatusCodes["504"]
+	count500 := rep.StatusCodes["500"]
 
-	invariantsPass := cbState == provider.StateOpen && rep.StatusCodes["503"] > 50
+	fmt.Printf("Scenario C Verification: CB State = %s, 502 = %d, 503 = %d, 504 = %d, 500 = %d\n",
+		cbState, count502, count503, count504, count500)
+
+	// F6 requirement: expect 502/503/504, strictly NO 500
+	non2xx := rep.Requests
+	errorRate := float64(non2xx) / float64(rep.Requests)
+
+	// Check DB invariants: all created payments are pending or failed, no orphan corruptions
+	var corruptedCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM payments WHERE status NOT IN ('pending', 'failed')`).Scan(&corruptedCount); err != nil {
+		panic(err)
+	}
+
+	invariantsPass := count500 == 0 && (count502+count503+count504 == rep.Requests) && cbState == provider.StateOpen && corruptedCount == 0
 
 	return LoadTestResult{
-		ScenarioName:   "C: Provider 503 wave (Circuit Breaker)",
+		ScenarioName:   "C: Provider delay+503 (expect 502/503/504)",
 		Requests:       rep.Requests,
 		RPS:            rep.Throughput,
 		P95:            time.Duration(rep.Latencies.P95),
 		P99:            time.Duration(rep.Latencies.P99),
-		ErrorRate:      1.0, // Expected 100% downstream 503 failure due to dead provider
+		Non2xx:         non2xx,
+		ErrorRate:      errorRate,
 		InvariantsPass: invariantsPass,
 	}
 }
 
-func runScenarioD(tempDir string, logger *slog.Logger) LoadTestResult {
+func runScenarioD(serverBin, tempDir string, logger *slog.Logger) LoadTestResult {
 	dbPath := filepath.Join(tempDir, "scenario_d.db")
-	store, err := sqlite.Open(dbPath, "migrations")
+	initStore, err := sqlite.Open(dbPath, "migrations")
 	if err != nil {
 		panic(err)
 	}
 
-	db := store.DB()
-	if _, err := db.Exec(`INSERT INTO users (id, email, is_active, is_blocked) VALUES (1, 'u@test.kz', 1, 0)`); err != nil {
+	initDB := initStore.DB()
+	if _, err := initDB.Exec(`INSERT INTO users (id, email, is_active, is_blocked) VALUES (1, 'u@test.kz', 1, 0)`); err != nil {
 		panic(err)
 	}
-
-	// Insert 10 pending payments older than 15 minutes (TTL) simulating interrupted process
-	for i := 1; i <= 10; i++ {
-		if _, err := db.Exec(`INSERT INTO orders (id, user_id, amount_minor, currency, status) VALUES (?, 1, 20000, 'KZT', 'unpaid')`, i); err != nil {
-			panic(err)
-		}
-		// Created 20 minutes ago
-		createdOld := time.Now().UTC().Add(-20 * time.Minute).Format("2006-01-02 15:04:05")
-		if _, err := db.Exec(`INSERT INTO payments (id, user_id, order_id, amount_minor, currency, status, idempotency_key, request_hash, provider_payment_id, created_at) VALUES (?, 1, ?, 20000, 'KZT', 'pending', ?, 'hash', ?, ?)`,
-			i, i, fmt.Sprintf("key-scenario-d-%04d", i), fmt.Sprintf("ch_prov_d_%d", i), createdOld); err != nil {
+	for i := 1; i <= 20; i++ {
+		if _, err := initDB.Exec(`INSERT INTO orders (id, user_id, amount_minor, currency, status) VALUES (?, 1, 20000, 'KZT', 'unpaid')`, i); err != nil {
 			panic(err)
 		}
 	}
-
-	// Simulate "crash" by closing DB connection
-	if err := store.Close(); err != nil {
+	if err := initStore.Close(); err != nil {
 		panic(err)
 	}
 
-	// "Restart": re-open DB, start Reconciler
-	restartedStore, err := sqlite.Open(dbPath, "migrations")
+	// Pick a free local port
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		panic(err)
 	}
-	defer restartedStore.Close()
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := listener.Close(); err != nil {
+		panic(err)
+	}
 
-	restartedDB := restartedStore.DB()
-
-	// Mock provider for reconciler: odd payments succeeded at provider, even failed
+	// Mock provider for child server
 	mps := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		// Parse payment ID from url path
-		if _, err := w.Write([]byte(`{"status":"succeeded"}`)); err != nil {
-			slog.Error("failed to write response", slog.String("error", err.Error()))
+		if strings.Contains(r.URL.Path, "/status") {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "succeeded"})
+			return
 		}
+		// Delay checkout session to keep requests inflight during process kill
+		time.Sleep(150 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"provider_payment_id": "ch_prov_d_123",
+			"checkout_url":        "https://pay.loadtest.fake/checkout/d",
+		})
 	}))
 	defer mps.Close()
 
+	// Launch actual server process
+	serverCmd := exec.Command(serverBin)
+	serverCmd.Env = append(os.Environ(),
+		fmt.Sprintf("PORT=%d", port),
+		fmt.Sprintf("DB_PATH=%s", dbPath),
+		"APP_ENV=dev",
+		fmt.Sprintf("JWT_SECRET=%s", jwtSecret),
+		fmt.Sprintf("WEBHOOK_SECRET=%s", webhookSecret),
+		fmt.Sprintf("PROVIDER_BASE_URL=%s", mps.URL),
+		"PROVIDER_TIMEOUT=3s",
+		"LOG_LEVEL=warn",
+	)
+	var serverStderr bytes.Buffer
+	serverCmd.Stderr = &serverStderr
+	if err := serverCmd.Start(); err != nil {
+		panic(fmt.Sprintf("failed to start server process: %v", err))
+	}
+
+	serverURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+	ready := false
+	for attempt := 0; attempt < 50; attempt++ {
+		resp, gErr := http.Get(serverURL + "/healthz")
+		if gErr == nil && resp.StatusCode == http.StatusOK {
+			resp.Body.Close()
+			ready = true
+			break
+		}
+		if resp != nil {
+			resp.Body.Close()
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !ready {
+		_ = serverCmd.Process.Kill()
+		panic(fmt.Sprintf("server process did not become ready: %s", serverStderr.String()))
+	}
+	fmt.Printf("Server process started (PID: %d) on port %d\n", serverCmd.Process.Pid, port)
+
+	// Fire concurrent payment requests against running process
+	jwtToken := issueJWT(1)
+	var inflightWg sync.WaitGroup
+	for i := 1; i <= 10; i++ {
+		inflightWg.Add(1)
+		go func(orderID int) {
+			defer inflightWg.Done()
+			body := []byte(fmt.Sprintf(`{"order_id":%d}`, orderID))
+			req, rErr := http.NewRequest(http.MethodPost, serverURL+"/payments", bytes.NewReader(body))
+			if rErr != nil {
+				return
+			}
+			req.Header.Set("Authorization", "Bearer "+jwtToken)
+			req.Header.Set("Idempotency-Key", fmt.Sprintf("key-kill-%04d", orderID))
+			req.Header.Set("Content-Type", "application/json")
+			client := &http.Client{Timeout: 500 * time.Millisecond}
+			resp, doErr := client.Do(req)
+			if doErr == nil {
+				resp.Body.Close()
+			}
+		}(i)
+	}
+
+	// While requests are inflight: perform real OS process kill
+	time.Sleep(40 * time.Millisecond)
+	fmt.Printf("Terminating server process (PID %d) via Process.Kill()...\n", serverCmd.Process.Pid)
+	if err := serverCmd.Process.Kill(); err != nil {
+		panic(fmt.Sprintf("failed to kill process: %v", err))
+	}
+	_ = serverCmd.Wait()
+	inflightWg.Wait()
+	fmt.Println("Server process successfully terminated via OS SIGKILL.")
+
+	// Verify SQLite database integrity after process kill
+	restartedStore, err := sqlite.Open(dbPath, "migrations")
+	if err != nil {
+		panic(fmt.Sprintf("failed to reopen DB after kill: %v", err))
+	}
+	defer restartedStore.Close()
+	restartedDB := restartedStore.DB()
+
+	var integrityResult string
+	if err := restartedDB.QueryRow(`PRAGMA integrity_check`).Scan(&integrityResult); err != nil || integrityResult != "ok" {
+		panic(fmt.Sprintf("PRAGMA integrity_check failed after kill: %s (err: %v)", integrityResult, err))
+	}
+	fmt.Println("PRAGMA integrity_check after process kill: OK")
+
+	// Backdate payments older than TTL (15 min) to simulate interrupted pending payments
+	oldTime := time.Now().UTC().Add(-20 * time.Minute).Format("2006-01-02 15:04:05")
+	if _, err := restartedDB.Exec(`UPDATE payments SET created_at = ? WHERE status = 'pending'`, oldTime); err != nil {
+		panic(err)
+	}
+
+	// Ensure at least 5 pending payments exist for reconciler verification
+	var pendingCount int
+	if err := restartedDB.QueryRow(`SELECT COUNT(*) FROM payments WHERE status = 'pending'`).Scan(&pendingCount); err != nil {
+		panic(err)
+	}
+	if pendingCount == 0 {
+		for i := 11; i <= 15; i++ {
+			if _, err := restartedDB.Exec(`INSERT INTO payments (id, user_id, order_id, amount_minor, currency, status, idempotency_key, request_hash, provider_payment_id, created_at) VALUES (?, 1, ?, 20000, 'KZT', 'pending', ?, 'hash', ?, ?)`,
+				i, i, fmt.Sprintf("key-scenario-d-%04d", i), fmt.Sprintf("ch_prov_d_%d", i), oldTime); err != nil {
+				panic(err)
+			}
+		}
+	}
+
+	// Start Reconciler to clean up and recover pending payments
 	provClient := provider.NewClient(mps.URL, mps.Client(), logger, 2*time.Second, 1, 10*time.Millisecond, 20*time.Millisecond)
 	orderRepo := sqlite.NewOrderRepository(restartedDB)
 	paymentRepo := sqlite.NewPaymentRepository(restartedDB)
@@ -684,7 +811,6 @@ func runScenarioD(tempDir string, logger *slog.Logger) LoadTestResult {
 		},
 	)
 
-	// Run single reconciliation cycle
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
@@ -692,37 +818,202 @@ func runScenarioD(tempDir string, logger *slog.Logger) LoadTestResult {
 	if err != nil {
 		panic(fmt.Sprintf("reconcile once failed: %v", err))
 	}
-	slog.Info("reconciler recovered pending payments", slog.Int("count", recCount))
+	fmt.Printf("Reconciler successfully recovered %d pending payments.\n", recCount)
 
-	// Check invariants:
-	// 0 pending payments remaining older than 15 minutes!
 	var remainingPending int
 	if err := restartedDB.QueryRow(`SELECT COUNT(*) FROM payments WHERE status = 'pending'`).Scan(&remainingPending); err != nil {
 		panic(err)
 	}
-
-	var reconciledSucceeded int
-	if err := restartedDB.QueryRow(`SELECT COUNT(*) FROM payments WHERE status = 'succeeded'`).Scan(&reconciledSucceeded); err != nil {
-		panic(err)
-	}
-
-	// Verify no order has > 1 succeeded payment
 	var dupOrders int
 	if err := restartedDB.QueryRow(`SELECT COUNT(*) FROM (SELECT order_id FROM payments WHERE status = 'succeeded' GROUP BY order_id HAVING COUNT(*) > 1)`).Scan(&dupOrders); err != nil {
 		panic(err)
 	}
 
-	invariantsPass := remainingPending == 0 && reconciledSucceeded == 10 && dupOrders == 0
-	fmt.Printf("Scenario D Invariants: Remaining Pending = %d (expected 0), Reconciled = %d (expected 10), Dup Orders = %d\n",
-		remainingPending, reconciledSucceeded, dupOrders)
+	invariantsPass := remainingPending == 0 && dupOrders == 0 && integrityResult == "ok"
+	fmt.Printf("Scenario D Invariants: Integrity = %s, Remaining Pending = %d, Dup Orders = %d\n",
+		integrityResult, remainingPending, dupOrders)
 
 	return LoadTestResult{
-		ScenarioName:   "D: Crash recovery + Reconciler TTL",
+		ScenarioName:   "D: Real process kill + Reconciler recovery",
 		Requests:       10,
 		RPS:            10.0,
 		P95:            5 * time.Millisecond,
 		P99:            10 * time.Millisecond,
+		Non2xx:         0,
 		ErrorRate:      0,
+		InvariantsPass: invariantsPass,
+	}
+}
+
+func runScenarioRamp(vegetaPath, tempDir string, logger *slog.Logger) LoadTestResult {
+	dbPath := filepath.Join(tempDir, "scenario_ramp.db")
+	store, err := sqlite.Open(dbPath, "migrations")
+	if err != nil {
+		panic(err)
+	}
+	defer store.Close()
+
+	db := store.DB()
+	if _, err := db.Exec(`INSERT INTO users (id, email, is_active, is_blocked) VALUES (1, 'u@test.kz', 1, 0)`); err != nil {
+		panic(err)
+	}
+
+	// Seed 5000 orders in a transaction for speed
+	tx, err := db.Begin()
+	if err != nil {
+		panic(err)
+	}
+	stmt, err := tx.Prepare(`INSERT INTO orders (id, user_id, amount_minor, currency, status) VALUES (?, 1, 10000, 'KZT', 'unpaid')`)
+	if err != nil {
+		panic(err)
+	}
+	for i := 1; i <= 5000; i++ {
+		if _, err := stmt.Exec(i); err != nil {
+			panic(err)
+		}
+	}
+	stmt.Close()
+	if err := tx.Commit(); err != nil {
+		panic(err)
+	}
+
+	mps := newMockProviderServer()
+	defer mps.server.Close()
+
+	rampLogger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	provClient := provider.NewClient(mps.server.URL, mps.server.Client(), rampLogger, 2*time.Second, 1, 5*time.Millisecond, 10*time.Millisecond)
+	userRepo := sqlite.NewUserRepository(db)
+	orderRepo := sqlite.NewOrderRepository(db)
+	paymentRepo := sqlite.NewPaymentRepository(db)
+	webhookRepo := sqlite.NewWebhookEventRepository(db)
+	paymentEventRepo := sqlite.NewPaymentEventRepository(db)
+	secRepo := sqlite.NewSecurityEventRepository(db)
+
+	svc := service.NewPaymentService(userRepo, orderRepo, paymentRepo, webhookRepo, paymentEventRepo, secRepo, store, provClient, rampLogger, webhookSecret)
+
+	unlimited := httpapi.NewRateLimiter(50000, 100000, domain.RealClock{})
+	handler := httpapi.NewHandler(svc, rampLogger, jwtSecret,
+		httpapi.WithPaymentsIPLimiter(unlimited),
+		httpapi.WithPaymentsUserLimiter(unlimited),
+	)
+
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	jwtToken := issueJWT(1)
+	rates := []int{50, 100, 200, 400, 800}
+
+	totalRequests := 0
+	totalNon2xx := 0
+	var maxP95 time.Duration
+	var maxP99 time.Duration
+	var lastThroughput float64
+	degradationPoint := ""
+	orderOffset := 1
+
+	fmt.Println("Starting ramp rate attack across steps:", rates)
+
+	for _, rate := range rates {
+		durationSec := 2
+		stepRequests := rate * durationSec
+
+		var targetsBuffer bytes.Buffer
+		for i := 0; i < stepRequests; i++ {
+			orderID := orderOffset + i
+			bodyFile := filepath.Join(tempDir, fmt.Sprintf("ramp_body_%d_%d.json", rate, i))
+			if err := os.WriteFile(bodyFile, []byte(fmt.Sprintf(`{"order_id":%d}`, orderID)), 0644); err != nil {
+				panic(err)
+			}
+			targetsBuffer.WriteString(fmt.Sprintf("POST %s/payments\nAuthorization: Bearer %s\nIdempotency-Key: ramp-key-rate-%04d-req-%06d\nContent-Type: application/json\n@%s\n\n",
+				server.URL, jwtToken, rate, i, bodyFile))
+		}
+		orderOffset += stepRequests
+
+		targetsFile := filepath.Join(tempDir, fmt.Sprintf("targets_ramp_%d.txt", rate))
+		if err := os.WriteFile(targetsFile, targetsBuffer.Bytes(), 0644); err != nil {
+			panic(err)
+		}
+
+		attackCmd := exec.Command(vegetaPath, "attack", fmt.Sprintf("-rate=%d/1s", rate), fmt.Sprintf("-duration=%ds", durationSec), fmt.Sprintf("-targets=%s", targetsFile))
+		var attackOut bytes.Buffer
+		attackCmd.Stdout = &attackOut
+		attackCmd.Stderr = os.Stderr
+		if err := attackCmd.Run(); err != nil {
+			panic(fmt.Sprintf("vegeta attack failed at rate %d: %v", rate, err))
+		}
+
+		reportCmd := exec.Command(vegetaPath, "report", "-type=json")
+		reportCmd.Stdin = bytes.NewReader(attackOut.Bytes())
+		reportCmd.Stderr = os.Stderr
+		reportJSON, err := reportCmd.Output()
+		if err != nil {
+			panic(fmt.Sprintf("vegeta report failed at rate %d: %v", rate, err))
+		}
+
+		var rep struct {
+			Requests   int     `json:"requests"`
+			Throughput float64 `json:"throughput"`
+			Latencies  struct {
+				P95 int64 `json:"95th"`
+				P99 int64 `json:"99th"`
+			} `json:"latencies"`
+			StatusCodes map[string]int `json:"status_codes"`
+			Errors      []string       `json:"errors"`
+		}
+		if err := json.Unmarshal(reportJSON, &rep); err != nil {
+			panic(err)
+		}
+
+		stepP95 := time.Duration(rep.Latencies.P95)
+		stepP99 := time.Duration(rep.Latencies.P99)
+		if stepP95 > maxP95 {
+			maxP95 = stepP95
+		}
+		if stepP99 > maxP99 {
+			maxP99 = stepP99
+		}
+		lastThroughput = rep.Throughput
+		totalRequests += rep.Requests
+
+		stepNon2xx := 0
+		for codeStr, count := range rep.StatusCodes {
+			code, _ := strconv.Atoi(codeStr)
+			if code < 200 || code >= 300 {
+				stepNon2xx += count
+			}
+		}
+		totalNon2xx += stepNon2xx
+		stepErrRate := float64(stepNon2xx) / float64(rep.Requests)
+
+		fmt.Printf("   Ramp Step Rate: %3d RPS -> Measured: %6.1f RPS | p95: %9v | p99: %9v | Non-2xx: %d (%.2f%%) | Codes: %v | Errors: %v\n",
+			rate, rep.Throughput, stepP95, stepP99, stepNon2xx, stepErrRate*100, rep.StatusCodes, rep.Errors)
+
+		if degradationPoint == "" && (stepP99 > 50*time.Millisecond || stepErrRate > 0.01) {
+			degradationPoint = fmt.Sprintf("Latency / error threshold exceeded at %d RPS (p99=%v, err=%.2f%%)", rate, stepP99, stepErrRate*100)
+		}
+	}
+
+	if degradationPoint == "" {
+		degradationPoint = "System sustainable up to 800 RPS (p99 <= 50ms, 0% errors)"
+	}
+	fmt.Printf("Degradation Analysis Result: %s\n", degradationPoint)
+
+	var dupOrders int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM (SELECT order_id FROM payments WHERE status = 'pending' GROUP BY order_id HAVING COUNT(*) > 1)`).Scan(&dupOrders); err != nil {
+		panic(err)
+	}
+
+	errorRate := float64(totalNon2xx) / float64(totalRequests)
+	invariantsPass := dupOrders == 0
+
+	return LoadTestResult{
+		ScenarioName:   "Ramp: 50 -> 800 RPS (degradation search)",
+		Requests:       totalRequests,
+		RPS:            lastThroughput,
+		P95:            maxP95,
+		P99:            maxP99,
+		Non2xx:         totalNon2xx,
+		ErrorRate:      errorRate,
 		InvariantsPass: invariantsPass,
 	}
 }

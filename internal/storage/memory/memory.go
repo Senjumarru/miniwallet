@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/Senjumarru/miniwallet/internal/domain"
-	"github.com/Senjumarru/miniwallet/internal/service"
 )
 
 type Storage struct {
@@ -146,34 +145,34 @@ func (s *Storage) SeedOrder(o *domain.Order) {
 	s.orders[o.ID] = o
 }
 
-func (s *Storage) Users() service.UserRepository {
-	return &userRepo{s: s}
+func (s *Storage) Users() *UserRepo {
+	return &UserRepo{s: s}
 }
 
-func (s *Storage) Orders() service.OrderRepository {
-	return &orderRepo{s: s}
+func (s *Storage) Orders() *OrderRepo {
+	return &OrderRepo{s: s}
 }
 
-func (s *Storage) Payments() service.PaymentRepository {
-	return &paymentRepo{s: s}
+func (s *Storage) Payments() *PaymentRepo {
+	return &PaymentRepo{s: s}
 }
 
-func (s *Storage) Webhooks() service.WebhookEventRepository {
-	return &webhookRepo{s: s}
+func (s *Storage) Webhooks() *WebhookRepo {
+	return &WebhookRepo{s: s}
 }
 
-func (s *Storage) PaymentEvents() service.PaymentEventRepository {
-	return &paymentEventRepo{s: s}
+func (s *Storage) PaymentEvents() *PaymentEventRepo {
+	return &PaymentEventRepo{s: s}
 }
 
-func (s *Storage) SecurityEvents() service.SecurityEventRepository {
-	return &securityEventRepo{s: s}
+func (s *Storage) SecurityEvents() *SecurityEventRepo {
+	return &SecurityEventRepo{s: s}
 }
 
 // UserRepo
-type userRepo struct{ s *Storage }
+type UserRepo struct{ s *Storage }
 
-func (r *userRepo) GetByID(ctx context.Context, id int64) (*domain.User, error) {
+func (r *UserRepo) GetByID(ctx context.Context, id int64) (*domain.User, error) {
 	r.s.mu.RLock()
 	defer r.s.mu.RUnlock()
 
@@ -186,13 +185,13 @@ func (r *userRepo) GetByID(ctx context.Context, id int64) (*domain.User, error) 
 }
 
 // OrderRepo
-type orderRepo struct{ s *Storage }
+type OrderRepo struct{ s *Storage }
 
-func (r *orderRepo) GetByID(ctx context.Context, id int64) (*domain.Order, error) {
+func (r *OrderRepo) GetByID(ctx context.Context, id int64) (*domain.Order, error) {
 	return r.GetByIDTx(ctx, nil, id)
 }
 
-func (r *orderRepo) GetByIDTx(ctx context.Context, tx *sql.Tx, id int64) (*domain.Order, error) {
+func (r *OrderRepo) GetByIDTx(ctx context.Context, tx *sql.Tx, id int64) (*domain.Order, error) {
 	r.s.mu.RLock()
 	defer r.s.mu.RUnlock()
 
@@ -204,7 +203,7 @@ func (r *orderRepo) GetByIDTx(ctx context.Context, tx *sql.Tx, id int64) (*domai
 	return &cp, nil
 }
 
-func (r *orderRepo) UpdateStatusTx(ctx context.Context, tx *sql.Tx, orderID int64, fromStatus, toStatus domain.OrderStatus) error {
+func (r *OrderRepo) UpdateStatusTx(ctx context.Context, tx *sql.Tx, orderID int64, fromStatus, toStatus domain.OrderStatus) error {
 	r.s.mu.Lock()
 	defer r.s.mu.Unlock()
 
@@ -221,13 +220,13 @@ func (r *orderRepo) UpdateStatusTx(ctx context.Context, tx *sql.Tx, orderID int6
 }
 
 // PaymentRepo
-type paymentRepo struct{ s *Storage }
+type PaymentRepo struct{ s *Storage }
 
-func (r *paymentRepo) GetByID(ctx context.Context, id int64) (*domain.Payment, error) {
+func (r *PaymentRepo) GetByID(ctx context.Context, id int64) (*domain.Payment, error) {
 	return r.GetByIDTx(ctx, nil, id)
 }
 
-func (r *paymentRepo) GetByIDTx(ctx context.Context, tx *sql.Tx, id int64) (*domain.Payment, error) {
+func (r *PaymentRepo) GetByIDTx(ctx context.Context, tx *sql.Tx, id int64) (*domain.Payment, error) {
 	r.s.mu.RLock()
 	defer r.s.mu.RUnlock()
 
@@ -239,7 +238,7 @@ func (r *paymentRepo) GetByIDTx(ctx context.Context, tx *sql.Tx, id int64) (*dom
 	return &cp, nil
 }
 
-func (r *paymentRepo) GetByIdempotencyKey(ctx context.Context, userID int64, key string) (*domain.Payment, error) {
+func (r *PaymentRepo) GetByIdempotencyKey(ctx context.Context, userID int64, key string) (*domain.Payment, error) {
 	r.s.mu.RLock()
 	defer r.s.mu.RUnlock()
 
@@ -253,7 +252,7 @@ func (r *paymentRepo) GetByIdempotencyKey(ctx context.Context, userID int64, key
 	return &cp, nil
 }
 
-func (r *paymentRepo) GetActivePendingByOrderID(ctx context.Context, orderID int64) (*domain.Payment, error) {
+func (r *PaymentRepo) GetActivePendingByOrderID(ctx context.Context, orderID int64) (*domain.Payment, error) {
 	r.s.mu.RLock()
 	defer r.s.mu.RUnlock()
 
@@ -266,7 +265,7 @@ func (r *paymentRepo) GetActivePendingByOrderID(ctx context.Context, orderID int
 	return nil, domain.ErrPaymentNotFound
 }
 
-func (r *paymentRepo) GetPendingOlderThan(ctx context.Context, olderThan time.Time, limit int) ([]*domain.Payment, error) {
+func (r *PaymentRepo) GetPendingOlderThan(ctx context.Context, olderThan time.Time, limit int) ([]*domain.Payment, error) {
 	r.s.mu.RLock()
 	defer r.s.mu.RUnlock()
 
@@ -283,7 +282,7 @@ func (r *paymentRepo) GetPendingOlderThan(ctx context.Context, olderThan time.Ti
 	return list, nil
 }
 
-func (r *paymentRepo) CreatePending(ctx context.Context, p *domain.Payment) error {
+func (r *PaymentRepo) CreatePending(ctx context.Context, p *domain.Payment) error {
 	r.s.mu.Lock()
 	defer r.s.mu.Unlock()
 
@@ -312,11 +311,11 @@ func (r *paymentRepo) CreatePending(ctx context.Context, p *domain.Payment) erro
 	return nil
 }
 
-func (r *paymentRepo) UpdateSession(ctx context.Context, paymentID int64, providerPaymentID, checkoutURL string) error {
+func (r *PaymentRepo) UpdateSession(ctx context.Context, paymentID int64, providerPaymentID, checkoutURL string) error {
 	return r.UpdateSessionTx(ctx, nil, paymentID, providerPaymentID, checkoutURL)
 }
 
-func (r *paymentRepo) UpdateSessionTx(ctx context.Context, tx *sql.Tx, paymentID int64, providerPaymentID, checkoutURL string) error {
+func (r *PaymentRepo) UpdateSessionTx(ctx context.Context, tx *sql.Tx, paymentID int64, providerPaymentID, checkoutURL string) error {
 	r.s.mu.Lock()
 	defer r.s.mu.Unlock()
 
@@ -333,11 +332,11 @@ func (r *paymentRepo) UpdateSessionTx(ctx context.Context, tx *sql.Tx, paymentID
 	return nil
 }
 
-func (r *paymentRepo) UpdateStatus(ctx context.Context, paymentID int64, fromStatus, toStatus domain.PaymentStatus) error {
+func (r *PaymentRepo) UpdateStatus(ctx context.Context, paymentID int64, fromStatus, toStatus domain.PaymentStatus) error {
 	return r.UpdateStatusTx(ctx, nil, paymentID, fromStatus, toStatus)
 }
 
-func (r *paymentRepo) UpdateStatusTx(ctx context.Context, tx *sql.Tx, paymentID int64, fromStatus, toStatus domain.PaymentStatus) error {
+func (r *PaymentRepo) UpdateStatusTx(ctx context.Context, tx *sql.Tx, paymentID int64, fromStatus, toStatus domain.PaymentStatus) error {
 	r.s.mu.Lock()
 	defer r.s.mu.Unlock()
 
@@ -354,9 +353,9 @@ func (r *paymentRepo) UpdateStatusTx(ctx context.Context, tx *sql.Tx, paymentID 
 }
 
 // WebhookRepo
-type webhookRepo struct{ s *Storage }
+type WebhookRepo struct{ s *Storage }
 
-func (r *webhookRepo) RecordEventTx(ctx context.Context, tx *sql.Tx, eventID, eventType string, payload []byte) (bool, error) {
+func (r *WebhookRepo) RecordEventTx(ctx context.Context, tx *sql.Tx, eventID, eventType string, payload []byte) (bool, error) {
 	r.s.mu.Lock()
 	defer r.s.mu.Unlock()
 
@@ -368,9 +367,9 @@ func (r *webhookRepo) RecordEventTx(ctx context.Context, tx *sql.Tx, eventID, ev
 }
 
 // PaymentEventRepo
-type paymentEventRepo struct{ s *Storage }
+type PaymentEventRepo struct{ s *Storage }
 
-func (r *paymentEventRepo) RecordEventTx(ctx context.Context, tx *sql.Tx, e domain.PaymentEvent) error {
+func (r *PaymentEventRepo) RecordEventTx(ctx context.Context, tx *sql.Tx, e domain.PaymentEvent) error {
 	r.s.mu.Lock()
 	defer r.s.mu.Unlock()
 
@@ -383,7 +382,7 @@ func (r *paymentEventRepo) RecordEventTx(ctx context.Context, tx *sql.Tx, e doma
 	return nil
 }
 
-func (r *paymentEventRepo) ListByPaymentID(ctx context.Context, paymentID int64) ([]domain.PaymentEvent, error) {
+func (r *PaymentEventRepo) ListByPaymentID(ctx context.Context, paymentID int64) ([]domain.PaymentEvent, error) {
 	r.s.mu.RLock()
 	defer r.s.mu.RUnlock()
 
@@ -396,7 +395,7 @@ func (r *paymentEventRepo) ListByPaymentID(ctx context.Context, paymentID int64)
 	return res, nil
 }
 
-func (r *paymentEventRepo) GetManualReviewEvents(ctx context.Context) ([]domain.PaymentEvent, error) {
+func (r *PaymentEventRepo) GetManualReviewEvents(ctx context.Context) ([]domain.PaymentEvent, error) {
 	r.s.mu.RLock()
 	defer r.s.mu.RUnlock()
 
@@ -412,13 +411,13 @@ func (r *paymentEventRepo) GetManualReviewEvents(ctx context.Context) ([]domain.
 }
 
 // SecurityEventRepo
-type securityEventRepo struct{ s *Storage }
+type SecurityEventRepo struct{ s *Storage }
 
-func (r *securityEventRepo) RecordSecurityEvent(ctx context.Context, e domain.SecurityEvent) error {
+func (r *SecurityEventRepo) RecordSecurityEvent(ctx context.Context, e domain.SecurityEvent) error {
 	return r.RecordSecurityEventTx(ctx, nil, e)
 }
 
-func (r *securityEventRepo) RecordSecurityEventTx(ctx context.Context, tx *sql.Tx, e domain.SecurityEvent) error {
+func (r *SecurityEventRepo) RecordSecurityEventTx(ctx context.Context, tx *sql.Tx, e domain.SecurityEvent) error {
 	r.s.mu.Lock()
 	defer r.s.mu.Unlock()
 
@@ -430,7 +429,7 @@ func (r *securityEventRepo) RecordSecurityEventTx(ctx context.Context, tx *sql.T
 	return nil
 }
 
-func (r *securityEventRepo) ListSecurityEvents(ctx context.Context) ([]domain.SecurityEvent, error) {
+func (r *SecurityEventRepo) ListSecurityEvents(ctx context.Context) ([]domain.SecurityEvent, error) {
 	r.s.mu.RLock()
 	defer r.s.mu.RUnlock()
 

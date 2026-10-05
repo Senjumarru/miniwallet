@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -156,6 +157,24 @@ func TestWriteDomainError_Table(t *testing.T) {
 			err:            provider.ErrProviderUnavailable,
 			expectedStatus: http.StatusBadGateway,
 			expectedCode:   "provider_unavailable",
+		},
+		{
+			name:           "ErrAmbiguousOutcome",
+			err:            provider.ErrAmbiguousOutcome,
+			expectedStatus: http.StatusBadGateway,
+			expectedCode:   "provider_unavailable",
+		},
+		{
+			name:           "ErrDeadlineExceeded",
+			err:            context.DeadlineExceeded,
+			expectedStatus: http.StatusGatewayTimeout,
+			expectedCode:   "gateway_timeout",
+		},
+		{
+			name:           "ErrDefinitiveRejection",
+			err:            provider.ErrDefinitiveRejection,
+			expectedStatus: http.StatusBadGateway,
+			expectedCode:   "provider_rejected",
 		},
 	}
 

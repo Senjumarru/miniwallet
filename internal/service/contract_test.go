@@ -59,6 +59,29 @@ func (s *sqliteStoreWrapper) PaymentEvents() service.PaymentEventRepository {
 func (s *sqliteStoreWrapper) SecurityEvents() service.SecurityEventRepository {
 	return s.Storage.SecurityEvents()
 }
+
+type memoryStoreWrapper struct {
+	*memory.Storage
+}
+
+func (s *memoryStoreWrapper) Users() service.UserRepository {
+	return s.Storage.Users()
+}
+func (s *memoryStoreWrapper) Orders() service.OrderRepository {
+	return s.Storage.Orders()
+}
+func (s *memoryStoreWrapper) Payments() service.PaymentRepository {
+	return s.Storage.Payments()
+}
+func (s *memoryStoreWrapper) Webhooks() service.WebhookEventRepository {
+	return s.Storage.Webhooks()
+}
+func (s *memoryStoreWrapper) PaymentEvents() service.PaymentEventRepository {
+	return s.Storage.PaymentEvents()
+}
+func (s *memoryStoreWrapper) SecurityEvents() service.SecurityEventRepository {
+	return s.Storage.SecurityEvents()
+}
 func (s *sqliteStoreWrapper) SeedUser(u *domain.User) {
 	isBlocked := 0
 	if u.IsBlocked {
@@ -114,7 +137,7 @@ func getStoreFactories(t *testing.T) []storeFactory {
 			name: "memory",
 			setup: func(t *testing.T) (contractTestStore, func()) {
 				s := memory.New()
-				return s, func() {}
+				return &memoryStoreWrapper{Storage: s}, func() {}
 			},
 		},
 		{

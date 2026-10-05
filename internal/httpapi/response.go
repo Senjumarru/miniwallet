@@ -1,9 +1,11 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 
 	"github.com/Senjumarru/miniwallet/internal/domain"
@@ -103,10 +105,21 @@ func writeDomainError(w http.ResponseWriter, err error) {
 	case errors.Is(err, domain.ErrWebhookAmountMismatch):
 		writeError(w, http.StatusUnprocessableEntity, "amount_mismatch", "Webhook amount or currency mismatch")
 
-	case errors.Is(err, provider.ErrProviderUnavailable):
+	case errors.Is(err, context.DeadlineExceeded), isTimeoutError(err):
+		writeError(w, http.StatusGatewayTimeout, "gateway_timeout", "Payment provider request timed out")
+
+	case errors.Is(err, provider.ErrAmbiguousOutcome), errors.Is(err, provider.ErrProviderUnavailable):
 		writeError(w, http.StatusBadGateway, "provider_unavailable", "Payment provider is currently unavailable")
+
+	case errors.Is(err, provider.ErrDefinitiveRejection), errors.Is(err, provider.ErrProviderClientError), errors.Is(err, provider.ErrProviderFatal):
+		writeError(w, http.StatusBadGateway, "provider_rejected", "Payment provider rejected request")
 
 	default:
 		writeError(w, http.StatusInternalServerError, "internal_error", "An internal error occurred")
 	}
+}
+
+func isTimeoutError(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
