@@ -16,4 +16,6 @@ bin/
 /vendor/
 
 *.out
+coverage
+coverage/
 /c
