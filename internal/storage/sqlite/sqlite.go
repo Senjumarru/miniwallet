@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -78,7 +79,7 @@ func (s *Storage) SeedUser(u *domain.User) {
 			is_blocked = excluded.is_blocked`,
 		u.ID, u.Email, isActive, isBlocked)
 	if err != nil {
-		panic(fmt.Sprintf("seed user failed: %v", err))
+		slog.Error("seed user failed", slog.String("error", err.Error()), slog.Int64("user_id", u.ID))
 	}
 }
 
@@ -101,7 +102,7 @@ func (s *Storage) SeedOrder(o *domain.Order) {
 			status = excluded.status`,
 		o.ID, o.UserID, o.AmountMinor, curr, status)
 	if err != nil {
-		panic(fmt.Sprintf("seed order failed: %v", err))
+		slog.Error("seed order failed", slog.String("error", err.Error()), slog.Int64("order_id", o.ID))
 	}
 }
 
