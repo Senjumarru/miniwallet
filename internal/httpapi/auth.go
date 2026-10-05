@@ -19,19 +19,32 @@ type JWTClaims struct {
 
 type JWTManager struct {
 	secret []byte
+	clock  domain.Clock
 }
 
 func NewJWTManager(secret []byte) *JWTManager {
 	return &JWTManager{secret: secret}
 }
 
+func (m *JWTManager) SetClock(clock domain.Clock) {
+	m.clock = clock
+}
+
+func (m *JWTManager) now() time.Time {
+	if m.clock != nil {
+		return m.clock.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
 func (m *JWTManager) GenerateToken(userID int64, ttl time.Duration) (string, error) {
+	now := m.now()
 	claims := JWTClaims{
 		UserID: userID,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   strconv.FormatInt(userID, 10),
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(ttl)),
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
+			IssuedAt:  jwt.NewNumericDate(now),
 		},
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
@@ -39,12 +52,16 @@ func (m *JWTManager) GenerateToken(userID int64, ttl time.Duration) (string, err
 }
 
 func (m *JWTManager) VerifyToken(tokenString string) (int64, error) {
-	token, err := jwt.ParseWithClaims(tokenString, &JWTClaims{}, func(token *jwt.Token) (interface{}, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
-		}
-		return m.secret, nil
-	})
+	token, err := jwt.ParseWithClaims(
+		tokenString,
+		&JWTClaims{},
+		func(token *jwt.Token) (interface{}, error) {
+			return m.secret, nil
+		},
+		jwt.WithValidMethods([]string{"HS256"}),
+		jwt.WithExpirationRequired(),
+		jwt.WithTimeFunc(m.now),
+	)
 	if err != nil {
 		return 0, fmt.Errorf("parse token: %w", err)
 	}
@@ -52,6 +69,11 @@ func (m *JWTManager) VerifyToken(tokenString string) (int64, error) {
 	claims, ok := token.Claims.(*JWTClaims)
 	if !ok || !token.Valid {
 		return 0, errors.New("invalid token claims")
+	}
+
+	// Инвариант 2: exp обязателен
+	if claims.ExpiresAt == nil {
+		return 0, errors.New("missing exp claim in token")
 	}
 
 	if claims.UserID > 0 {
