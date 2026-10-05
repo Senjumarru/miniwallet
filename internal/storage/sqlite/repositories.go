@@ -222,13 +222,32 @@ func (r *PaymentRepository) GetPendingOlderThan(ctx context.Context, olderThan t
 }
 
 func (r *PaymentRepository) CreatePending(ctx context.Context, p *domain.Payment) error {
-	res, err := r.db.ExecContext(ctx, `
+	query := `
 			INSERT INTO payments (
 				user_id, order_id, amount_minor, currency, status,
 				idempotency_key, request_hash
-			) VALUES (?, ?, ?, ?, 'pending', ?, ?)`,
+			) VALUES (?, ?, ?, ?, 'pending', ?, ?)`
+	args := []any{
 		p.UserID, p.OrderID, p.AmountMinor, p.Currency,
-		p.IdempotencyKey, p.RequestHash)
+		p.IdempotencyKey, p.RequestHash,
+	}
+
+	if !p.CreatedAt.IsZero() {
+		query = `
+			INSERT INTO payments (
+				user_id, order_id, amount_minor, currency, status,
+				idempotency_key, request_hash, created_at, updated_at
+			) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)`
+		createdFormatted := p.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z")
+		updatedAt := p.UpdatedAt
+		if updatedAt.IsZero() {
+			updatedAt = p.CreatedAt
+		}
+		updatedFormatted := updatedAt.UTC().Format("2006-01-02T15:04:05.000Z")
+		args = append(args, createdFormatted, updatedFormatted)
+	}
+
+	res, err := r.db.ExecContext(ctx, query, args...)
 	if err != nil {
 		if classified := classifySQLiteError(err); classified != err {
 			return classified

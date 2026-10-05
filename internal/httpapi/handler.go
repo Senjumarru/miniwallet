@@ -26,6 +26,7 @@ type HandlerOptions struct {
 	PaymentsIPLimiter   *RateLimiter
 	WebhookLimiter      *RateLimiter
 	ReadyChecker        func(context.Context) error
+	MetricsHandler      http.Handler
 }
 
 func WithPaymentsUserLimiter(l *RateLimiter) func(*HandlerOptions) {
@@ -49,6 +50,12 @@ func WithWebhookLimiter(l *RateLimiter) func(*HandlerOptions) {
 func WithReadyChecker(fn func(context.Context) error) func(*HandlerOptions) {
 	return func(o *HandlerOptions) {
 		o.ReadyChecker = fn
+	}
+}
+
+func WithMetricsHandler(h http.Handler) func(*HandlerOptions) {
+	return func(o *HandlerOptions) {
+		o.MetricsHandler = h
 	}
 }
 
@@ -92,7 +99,11 @@ func NewHandler(paymentSvc *service.PaymentService, logger *slog.Logger, jwtSecr
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 	mux.HandleFunc("GET /readyz", s.handleReadyz)
-	mux.Handle("GET /metrics", promhttp.Handler())
+	metricsHandler := options.MetricsHandler
+	if metricsHandler == nil {
+		metricsHandler = promhttp.Handler()
+	}
+	mux.Handle("GET /metrics", metricsHandler)
 
 	return RequestIDMiddleware(LoggingMiddleware(logger)(mux))
 }

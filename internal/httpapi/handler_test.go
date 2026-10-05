@@ -628,6 +628,86 @@ func TestHTTP_Webhook(t *testing.T) {
 			t.Errorf("expected clean 401 error envelope, got: %s", w.Body.String())
 		}
 	})
+
+	t.Run("body_exceeds_64kb_rejected_400", func(t *testing.T) {
+		largeBody := make([]byte, 65*1024)
+		copy(largeBody, webhookPayload)
+		now := time.Now().Unix()
+		sig := sign(secret, now, largeBody)
+
+		req := httptest.NewRequest(http.MethodPost, "/webhooks/provider", bytes.NewReader(largeBody))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Signature", sig)
+		req.Header.Set("X-Timestamp", fmt.Sprintf("%d", now))
+
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 Bad Request for body > 64KB, got %d: %s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("timestamp_past_301s_rejected_401", func(t *testing.T) {
+		pastTime := time.Now().Unix() - 301
+		sig := sign(secret, pastTime, webhookPayload)
+
+		req := httptest.NewRequest(http.MethodPost, "/webhooks/provider", bytes.NewReader(webhookPayload))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Signature", sig)
+		req.Header.Set("X-Timestamp", fmt.Sprintf("%d", pastTime))
+
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 for timestamp older than 5 minutes, got %d", w.Code)
+		}
+	})
+
+	t.Run("timestamp_future_301s_rejected_401", func(t *testing.T) {
+		futureTime := time.Now().Unix() + 301
+		sig := sign(secret, futureTime, webhookPayload)
+
+		req := httptest.NewRequest(http.MethodPost, "/webhooks/provider", bytes.NewReader(webhookPayload))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Signature", sig)
+		req.Header.Set("X-Timestamp", fmt.Sprintf("%d", futureTime))
+
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 for timestamp in future > 5 minutes, got %d", w.Code)
+		}
+	})
+
+	t.Run("missing_security_headers_rejected_401", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/webhooks/provider", bytes.NewReader(webhookPayload))
+		req.Header.Set("Content-Type", "application/json")
+
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 for missing headers, got %d", w.Code)
+		}
+	})
+
+	t.Run("malformed_hex_signature_rejected_401", func(t *testing.T) {
+		now := time.Now().Unix()
+		req := httptest.NewRequest(http.MethodPost, "/webhooks/provider", bytes.NewReader(webhookPayload))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Signature", "not-a-valid-hex-signature-string")
+		req.Header.Set("X-Timestamp", fmt.Sprintf("%d", now))
+
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 for malformed hex signature, got %d", w.Code)
+		}
+	})
 }
 
 func TestHTTP_Healthz_And_Readyz(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 )
 
 type Storage struct {
+	txMu          sync.Mutex
 	mu            sync.RWMutex
 	clock         domain.Clock
 	users         map[int64]*domain.User
@@ -23,6 +24,87 @@ type Storage struct {
 	userKeyIndex  map[string]int64
 	nextPayID     int64
 	nextEventID   int64
+}
+
+type storageSnapshot struct {
+	users         map[int64]*domain.User
+	orders        map[int64]*domain.Order
+	payments      map[int64]*domain.Payment
+	paymentEvents map[int64][]domain.PaymentEvent
+	securityEvts  []domain.SecurityEvent
+	webhookEvts   map[string]struct{}
+	userKeyIndex  map[string]int64
+	nextPayID     int64
+	nextEventID   int64
+}
+
+func (s *Storage) snapshot() *storageSnapshot {
+	snap := &storageSnapshot{
+		users:         make(map[int64]*domain.User, len(s.users)),
+		orders:        make(map[int64]*domain.Order, len(s.orders)),
+		payments:      make(map[int64]*domain.Payment, len(s.payments)),
+		paymentEvents: make(map[int64][]domain.PaymentEvent, len(s.paymentEvents)),
+		securityEvts:  make([]domain.SecurityEvent, len(s.securityEvts)),
+		webhookEvts:   make(map[string]struct{}, len(s.webhookEvts)),
+		userKeyIndex:  make(map[string]int64, len(s.userKeyIndex)),
+		nextPayID:     s.nextPayID,
+		nextEventID:   s.nextEventID,
+	}
+
+	for k, v := range s.users {
+		cp := *v
+		snap.users[k] = &cp
+	}
+	for k, v := range s.orders {
+		cp := *v
+		snap.orders[k] = &cp
+	}
+	for k, v := range s.payments {
+		cp := *v
+		snap.payments[k] = &cp
+	}
+	for k, v := range s.paymentEvents {
+		evts := make([]domain.PaymentEvent, len(v))
+		copy(evts, v)
+		snap.paymentEvents[k] = evts
+	}
+	copy(snap.securityEvts, s.securityEvts)
+	for k := range s.webhookEvts {
+		snap.webhookEvts[k] = struct{}{}
+	}
+	for k, v := range s.userKeyIndex {
+		snap.userKeyIndex[k] = v
+	}
+	return snap
+}
+
+func (s *Storage) restore(snap *storageSnapshot) {
+	s.users = snap.users
+	s.orders = snap.orders
+	s.payments = snap.payments
+	s.paymentEvents = snap.paymentEvents
+	s.securityEvts = snap.securityEvts
+	s.webhookEvts = snap.webhookEvts
+	s.userKeyIndex = snap.userKeyIndex
+	s.nextPayID = snap.nextPayID
+	s.nextEventID = snap.nextEventID
+}
+
+func (s *Storage) WithinTransaction(ctx context.Context, fn func(txCtx context.Context, tx *sql.Tx) error) error {
+	s.txMu.Lock()
+	defer s.txMu.Unlock()
+
+	s.mu.Lock()
+	snap := s.snapshot()
+	s.mu.Unlock()
+
+	if err := fn(ctx, nil); err != nil {
+		s.mu.Lock()
+		s.restore(snap)
+		s.mu.Unlock()
+		return err
+	}
+	return nil
 }
 
 func New() *Storage {
@@ -62,10 +144,6 @@ func (s *Storage) SeedOrder(o *domain.Order) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.orders[o.ID] = o
-}
-
-func (s *Storage) WithinTransaction(ctx context.Context, fn func(txCtx context.Context, tx *sql.Tx) error) error {
-	return fn(ctx, nil)
 }
 
 func (s *Storage) Users() service.UserRepository {

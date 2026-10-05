@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 
+	"github.com/Senjumarru/miniwallet/internal/domain"
 	_ "modernc.org/sqlite"
 )
 
@@ -58,6 +59,51 @@ func (s *Storage) Payments() *PaymentRepository             { return NewPaymentR
 func (s *Storage) Webhooks() *WebhookEventRepository        { return NewWebhookEventRepository(s.db) }
 func (s *Storage) PaymentEvents() *PaymentEventRepository   { return NewPaymentEventRepository(s.db) }
 func (s *Storage) SecurityEvents() *SecurityEventRepository { return NewSecurityEventRepository(s.db) }
+
+func (s *Storage) SeedUser(u *domain.User) {
+	isBlocked := 0
+	if u.IsBlocked {
+		isBlocked = 1
+	}
+	isActive := 1
+	if !u.IsActive {
+		isActive = 0
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO users (id, email, is_active, is_blocked)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			email = excluded.email,
+			is_active = excluded.is_active,
+			is_blocked = excluded.is_blocked`,
+		u.ID, u.Email, isActive, isBlocked)
+	if err != nil {
+		panic(fmt.Sprintf("seed user failed: %v", err))
+	}
+}
+
+func (s *Storage) SeedOrder(o *domain.Order) {
+	status := string(o.Status)
+	if status == "" {
+		status = "unpaid"
+	}
+	curr := o.Currency
+	if curr == "" {
+		curr = "KZT"
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO orders (id, user_id, amount_minor, currency, status)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			user_id = excluded.user_id,
+			amount_minor = excluded.amount_minor,
+			currency = excluded.currency,
+			status = excluded.status`,
+		o.ID, o.UserID, o.AmountMinor, curr, status)
+	if err != nil {
+		panic(fmt.Sprintf("seed order failed: %v", err))
+	}
+}
 
 func (s *Storage) WithinTransaction(ctx context.Context, fn func(txCtx context.Context, tx *sql.Tx) error) error {
 	tx, err := s.db.BeginTx(ctx, nil)
