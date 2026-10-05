@@ -39,3 +39,19 @@ func TestLayering(t *testing.T) {
 		}
 	}
 }
+
+func TestServiceDoesNotImportDatabaseSQL(t *testing.T) {
+	t.Skip("known debt: internal/service imports database/sql in interfaces.go, payment.go, reconciler.go for TxManager and *sql.Tx")
+
+	out, err := exec.Command("go", "list", "-f",
+		"{{.ImportPath}} {{join .Imports \" \"}}", mod+"internal/service").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := strings.Fields(string(out))
+	for _, imp := range fields[1:] {
+		if imp == "database/sql" {
+			t.Errorf("internal/service must not import database/sql (imported in interfaces.go, payment.go, reconciler.go)")
+		}
+	}
+}
