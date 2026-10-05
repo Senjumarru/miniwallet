@@ -1,0 +1,339 @@
+openapi: 3.0.3
+info:
+  title: Miniwallet Payment Service API
+  description: >-
+    High-reliability, secure payment processing API with idempotency guarantees,
+    strict JWT authentication, HMAC-SHA256 webhook verification, rate limiting,
+    and Prometheus observability.
+  version: 1.0.0
+servers:
+  - url: http://localhost:8080
+    description: Local / Docker environment
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Enter JWT token containing user_id claim.
+
+  schemas:
+    CreatePaymentRequest:
+      type: object
+      required:
+        - order_id
+      properties:
+        order_id:
+          type: integer
+          format: int64
+          example: 101
+          description: Unique identifier of the order to be paid.
+        user_id:
+          type: integer
+          format: int64
+          example: 1
+          description: Optional. Note that caller identity is strictly derived from the verified JWT.
+
+    CreatePaymentResponse:
+      type: object
+      required:
+        - payment_id
+        - order_id
+        - amount_minor
+        - currency
+        - status
+        - checkout_url
+        - is_replay
+      properties:
+        payment_id:
+          type: integer
+          format: int64
+          example: 42
+        order_id:
+          type: integer
+          format: int64
+          example: 101
+        amount_minor:
+          type: integer
+          format: int64
+          example: 150000
+          description: Amount in minor units (e.g. 150000 = 1500.00 RUB).
+        currency:
+          type: string
+          example: RUB
+        status:
+          type: string
+          enum: [PENDING, SUCCEEDED, FAILED, CANCELLED]
+          example: PENDING
+        checkout_url:
+          type: string
+          format: uri
+          example: https://provider.example.com/checkout/sess_12345
+        is_replay:
+          type: boolean
+          example: false
+          description: True if this response is an idempotent replay of an earlier request.
+
+    WebhookPayload:
+      type: object
+      required:
+        - payment_id
+        - provider_payment_id
+        - status
+        - amount_minor
+        - currency
+      properties:
+        payment_id:
+          type: integer
+          format: int64
+          example: 42
+        provider_payment_id:
+          type: string
+          example: pay_psp_98765
+        status:
+          type: string
+          enum: [SUCCEEDED, FAILED]
+          example: SUCCEEDED
+        amount_minor:
+          type: integer
+          format: int64
+          example: 150000
+        currency:
+          type: string
+          example: RUB
+
+    StatusResponse:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          example: ok
+
+    ErrorEnvelope:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          required:
+            - code
+            - message
+          properties:
+            code:
+              type: string
+              example: bad_request
+            message:
+              type: string
+              example: Invalid JSON request body
+
+paths:
+  /payments:
+    post:
+      summary: Create or retrieve payment session
+      description: >-
+        Initiates a payment for the specified order or returns an existing payment session
+        if an identical Idempotency-Key is supplied.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Unique idempotency key (e.g. UUID) identifying this payment attempt.
+          example: 550e8400-e29b-41d4-a716-446655440000
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePaymentRequest'
+      responses:
+        '201':
+          description: Payment initiated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreatePaymentResponse'
+        '200':
+          description: Idempotent replay of an already processed request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreatePaymentResponse'
+        '400':
+          description: Bad request (malformed JSON or invalid order_id)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Unauthorized (missing or invalid Bearer token)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '404':
+          description: Order not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: Conflict (concurrent in-progress request, active payment exists, or idempotency mismatch)
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+              description: Recommended wait time in seconds before retrying
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '422':
+          description: Unprocessable entity (order already paid or cancelled)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /webhooks/provider:
+    post:
+      summary: Handle provider payment status webhook
+      description: >-
+        Receives payment completion notifications from the external payment provider.
+        Requires HMAC-SHA256 signature verification with replay protection via timestamp.
+      parameters:
+        - name: X-Signature
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Hex-encoded HMAC-SHA256 signature of body using webhook secret
+          example: 9b2d...c34a
+        - name: X-Timestamp
+          in: header
+          required: true
+          schema:
+            type: string
+          description: Unix timestamp in seconds or RFC3339 timestamp when webhook was dispatched
+          example: "1727800000"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookPayload'
+      responses:
+        '200':
+          description: Webhook acknowledged and processed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+        '400':
+          description: Bad request (malformed JSON or unreadable body)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '401':
+          description: Unauthorized (invalid signature or expired timestamp)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '422':
+          description: Amount mismatch or provider ID mismatch
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '429':
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '500':
+          description: Transient error (informs provider to retry delivery)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /health:
+    get:
+      summary: Basic liveness endpoint
+      responses:
+        '200':
+          description: Service is running
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+
+  /healthz:
+    get:
+      summary: Kubernetes liveness probe
+      responses:
+        '200':
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: alive
+
+  /readyz:
+    get:
+      summary: Kubernetes readiness probe
+      description: Verifies database connectivity and essential dependency health.
+      responses:
+        '200':
+          description: Service is ready to serve traffic
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ready
+        '503':
+          description: Service is not ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+
+  /metrics:
+    get:
+      summary: Prometheus metrics
+      responses:
+        '200':
+          description: Prometheus formatted metrics stream
+          content:
+            text/plain:
+              schema:
+                type: string
