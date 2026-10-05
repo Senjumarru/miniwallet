@@ -27,7 +27,7 @@
 В `internal/storage/memory/memory.go` транзакционный менеджер `WithinTransaction` реализован на основе паттерна **Deep Snapshot / Restore**:
 
 ```go
-func (s *Storage) WithinTransaction(ctx context.Context, fn func(txCtx context.Context, tx *sql.Tx) error) error {
+func (s *Storage) WithinTransaction(ctx context.Context, fn func(txCtx context.Context) error) error {
     s.txMu.Lock()
     defer s.txMu.Unlock()
 
@@ -35,7 +35,7 @@ func (s *Storage) WithinTransaction(ctx context.Context, fn func(txCtx context.C
     snap := s.snapshot()
     s.mu.Unlock()
 
-    if err := fn(ctx, nil); err != nil {
+    if err := fn(ctx); err != nil {
         s.mu.Lock()
         s.restore(snap)
         s.mu.Unlock()
@@ -51,11 +51,10 @@ func (s *Storage) WithinTransaction(ctx context.Context, fn func(txCtx context.C
    - Всех мап: `users`, `orders`, `payments`, `paymentEvents`, `webhookEvts`, `userKeyIndex`.
    - Среза `securityEvts`.
    - Автоинкрементных счетчиков `nextPayID`, `nextEventID`.
-3. **Выполнение**: Замыкание `fn` выполняется над текущим состоянием хранилища.
+3. **Выполнение**: Замыкание `fn` выполняется над текущим состоянием хранилища с передачей `txCtx`.
 4. **Откат при ошибке (Rollback)**: Если `fn` возвращает любую ошибку (`err != nil`), вызывается `s.restore(snap)`, который атомарно перезаписывает все мапы и счетчики сохранённым снимком `snap`.
 5. **Фиксация (Commit)**: Если `fn` возвращает `nil`, снимок освобождается, и все произведенные изменения остаются в силе.
 
-### Ограничения и особенности имитации
-- **Параметр `tx == nil`**: In-memory хранилище не имеет реального SQL-движка, поэтому передает в колбэк `tx = nil`.
-- **Игнорирование `tx` в методах `...Tx`**: Репозитории `UserRepo`, `OrderRepo`, `PaymentRepo`, `WebhookRepo`, `PaymentEventRepo`, `SecurityEventRepo` принимают аргумент `tx *sql.Tx`, но не вызывают на нем SQL-методы (`tx.Exec`, `tx.Query`), оперируя структурами Go. Прямой вызов методов на `tx` внутри `fn` привёл бы к `nil pointer dereference`.
+### Преимущества и верификация
+- **Полная изоляция от SQL**: Колбэк `fn func(txCtx context.Context) error` больше не содержит утечки `*sql.Tx`, полностью исключая риски `nil pointer dereference` в слое бизнес-логики.
 - **Верификация**: Полноценный откат подтвержден контрактными тестами `TestContract_ProcessWebhook_AtomicityRollback`, где сбой на шаге обновления заказа подтверждает полный возврат статусов платежа и отсутствие частичных изменений в `memory.Storage`.

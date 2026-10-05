@@ -25,6 +25,17 @@ export WEBHOOK_SECRET="your-strong-production-webhook-secret-at-least-32-bytes"
 go run ./cmd/server
 ```
 
+### Запуск в Docker и Docker Compose
+Сервис полностью упакован в минимальный контейнер на Alpine с запуском под непривилегированным пользователем:
+```bash
+# Сборка и запуск приложения совместно с Prometheus:
+docker compose up -d --build
+
+# Проверка состояния:
+docker compose ps
+curl http://localhost:8080/readyz
+```
+
 ### Переменные окружения
 
 | Переменная | По умолчанию | Описание |
@@ -33,12 +44,22 @@ go run ./cmd/server
 | `JWT_SECRET` | *нет* | Секрет подписи JWT (обязателен, >= 32 байт, запрещены dev-значения при APP_ENV!=dev) |
 | `WEBHOOK_SECRET` | *нет* | Секрет HMAC-SHA256 вебхуков (обязателен, >= 32 байт, не должен совпадать с JWT_SECRET) |
 | `WEBHOOK_SECRET_OLD` | `""` | Предыдущий секрет (для бесшовной ротации без даунтайма) |
+| `HOST` | `""` (или `0.0.0.0`) | Хост/интерфейс для прослушивания соединений |
 | `PORT` | `8080` | Порт HTTP-сервера |
 | `DB_PATH` | `wallet.db` | Путь к файлу SQLite |
 | `PROVIDER_BASE_URL` | `http://localhost:8081` | URL внешнего платёжного шлюза (PSP) |
 | `PROVIDER_TIMEOUT_MS` | `5000` | Таймаут вызовов провайдера в миллисекундах |
 | `MAX_RETRY_ATTEMPTS` | `4` | Максимальное число повторов запросов к PSP |
 | `LOG_LEVEL` | `info` | Уровень логирования: `debug`, `info`, `warn`, `error` |
+
+### Спецификация API (OpenAPI 3.0)
+Полная спецификация REST API сервиса доступна в файле [`api/openapi.yaml`](file:///C:/Users/senjumarru/GO/api/openapi.yaml).
+Она включает схемы запросов, ответов, ошибок, заголовков идемпотентности и безопасности:
+- `POST /payments` — создание или идемпотентный возврат платёжной сессии (JWT Bearer Auth).
+- `POST /webhooks/provider` — входящий вебхук PSP с проверкой подписи `X-Signature` (HMAC-SHA256) и `X-Timestamp`.
+- `GET /health` & `GET /healthz` — liveness-пробы.
+- `GET /readyz` — readiness-проба с проверкой подключения к SQLite.
+- `GET /metrics` — эндпоинт метрик Prometheus.
 
 ---
 
