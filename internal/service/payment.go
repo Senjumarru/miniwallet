@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -247,7 +246,7 @@ func (s *PaymentService) CreatePayment(ctx context.Context, in CreatePaymentInpu
 		return CreatePaymentResult{}, fmt.Errorf("create pending payment: %w", err)
 	}
 
-	if recErr := s.paymentEvents.RecordEventTx(ctx, nil, domain.PaymentEvent{
+	if recErr := s.paymentEvents.RecordEvent(ctx, domain.PaymentEvent{
 		PaymentID: payment.ID,
 		EventType: "payment.created",
 		ToStatus:  string(domain.PaymentStatusPending),
@@ -294,7 +293,7 @@ func (s *PaymentService) CreatePayment(ctx context.Context, in CreatePaymentInpu
 					slog.String("error", upErr.Error()),
 				)
 			}
-			if evErr := s.paymentEvents.RecordEventTx(detachedCtx, nil, domain.PaymentEvent{
+			if evErr := s.paymentEvents.RecordEvent(detachedCtx, domain.PaymentEvent{
 				PaymentID:  payment.ID,
 				EventType:  "payment.provider_rejected",
 				FromStatus: string(domain.PaymentStatusPending),
@@ -312,7 +311,7 @@ func (s *PaymentService) CreatePayment(ctx context.Context, in CreatePaymentInpu
 				slog.Int64("payment_id", payment.ID),
 				slog.String("error", err.Error()),
 			)
-			if evErr := s.paymentEvents.RecordEventTx(detachedCtx, nil, domain.PaymentEvent{
+			if evErr := s.paymentEvents.RecordEvent(detachedCtx, domain.PaymentEvent{
 				PaymentID: payment.ID,
 				EventType: "payment.provider_ambiguous_failure",
 				Metadata:  fmt.Sprintf(`{"error":%q}`, err.Error()),
@@ -338,7 +337,7 @@ func (s *PaymentService) CreatePayment(ctx context.Context, in CreatePaymentInpu
 		return CreatePaymentResult{}, fmt.Errorf("update payment session: %w", err)
 	}
 
-	if evErr := s.paymentEvents.RecordEventTx(ctx, nil, domain.PaymentEvent{
+	if evErr := s.paymentEvents.RecordEvent(ctx, domain.PaymentEvent{
 		PaymentID: payment.ID,
 		EventType: "payment.session_attached",
 		Metadata:  fmt.Sprintf(`{"provider_payment_id":%q}`, session.ProviderPaymentID),
@@ -431,9 +430,9 @@ func (s *PaymentService) ProcessWebhook(ctx context.Context, rawBody []byte, sig
 	var postCommitErr error
 
 	// 4. Выполнение в транзакции
-	txErr := s.txManager.WithinTransaction(ctx, func(txCtx context.Context, tx *sql.Tx) error {
+	txErr := s.txManager.WithinTransaction(ctx, func(txCtx context.Context) error {
 		// Дедупликация: повторная доставка одного event_id возвращает 200 без повторной обработки
-		isDuplicate, err := s.webhooks.RecordEventTx(txCtx, tx, payload.EventID, payload.EventType, rawBody)
+		isDuplicate, err := s.webhooks.RecordEvent(txCtx, payload.EventID, payload.EventType, rawBody)
 		if err != nil {
 			return fmt.Errorf("record webhook event: %w", err)
 		}
@@ -462,7 +461,7 @@ func (s *PaymentService) ProcessWebhook(ctx context.Context, rawBody []byte, sig
 		}
 
 		// Загрузка платежа строго через транзакцию
-		payment, err := s.payments.GetByIDTx(txCtx, tx, payload.PaymentID)
+		payment, err := s.payments.GetByID(txCtx, payload.PaymentID)
 		if err != nil {
 			if errors.Is(err, domain.ErrPaymentNotFound) {
 				// 3.5 Неизвестный payment_id: security_events, метрика, ответ 200 (повторять нечего)
@@ -471,7 +470,7 @@ func (s *PaymentService) ProcessWebhook(ctx context.Context, rawBody []byte, sig
 					slog.String("event_id", payload.EventID),
 				)
 				if s.securityEvents != nil {
-					if secErr := s.securityEvents.RecordSecurityEventTx(txCtx, tx, domain.SecurityEvent{
+					if secErr := s.securityEvents.RecordSecurityEvent(txCtx, domain.SecurityEvent{
 						EventType: "security.unknown_payment_id",
 						Metadata:  fmt.Sprintf(`{"payment_id":%d,"event_id":%q}`, payload.PaymentID, payload.EventID),
 					}); secErr != nil {
@@ -491,7 +490,7 @@ func (s *PaymentService) ProcessWebhook(ctx context.Context, rawBody []byte, sig
 					slog.String("event_id", payload.EventID),
 				)
 				if s.securityEvents != nil {
-					if secErr := s.securityEvents.RecordSecurityEventTx(txCtx, tx, domain.SecurityEvent{
+					if secErr := s.securityEvents.RecordSecurityEvent(txCtx, domain.SecurityEvent{
 						PaymentID: &payment.ID,
 						EventType: "security.missing_provider_payment_id",
 						Metadata:  fmt.Sprintf(`{"event_id":%q}`, payload.EventID),
@@ -502,11 +501,11 @@ func (s *PaymentService) ProcessWebhook(ctx context.Context, rawBody []byte, sig
 				return fmt.Errorf("missing provider_payment_id in payment.succeeded webhook")
 			}
 			if payment.ProviderPaymentID == "" {
-				if err := s.payments.UpdateSessionTx(txCtx, tx, payment.ID, payload.ProviderPaymentID, payment.CheckoutURL); err != nil {
+				if err := s.payments.UpdateSession(txCtx, payment.ID, payload.ProviderPaymentID, payment.CheckoutURL); err != nil {
 					return fmt.Errorf("attach provider_payment_id: %w", err)
 				}
 				payment.ProviderPaymentID = payload.ProviderPaymentID
-				if recErr := s.paymentEvents.RecordEventTx(txCtx, tx, domain.PaymentEvent{
+				if recErr := s.paymentEvents.RecordEvent(txCtx, domain.PaymentEvent{
 					PaymentID: payment.ID,
 					EventType: "payment.provider_id_attached",
 					Metadata:  fmt.Sprintf(`{"provider_payment_id":%q}`, payload.ProviderPaymentID),
@@ -524,7 +523,7 @@ func (s *PaymentService) ProcessWebhook(ctx context.Context, rawBody []byte, sig
 				slog.String("webhook_provider_id", payload.ProviderPaymentID),
 			)
 			if s.securityEvents != nil {
-				if secErr := s.securityEvents.RecordSecurityEventTx(txCtx, tx, domain.SecurityEvent{
+				if secErr := s.securityEvents.RecordSecurityEvent(txCtx, domain.SecurityEvent{
 					PaymentID: &payment.ID,
 					EventType: "security.provider_id_mismatch",
 					Metadata:  fmt.Sprintf(`{"expected":%q,"got":%q}`, payment.ProviderPaymentID, payload.ProviderPaymentID),
@@ -532,7 +531,7 @@ func (s *PaymentService) ProcessWebhook(ctx context.Context, rawBody []byte, sig
 					return fmt.Errorf("record security event: %w", secErr)
 				}
 			}
-			if recErr := s.paymentEvents.RecordEventTx(txCtx, tx, domain.PaymentEvent{
+			if recErr := s.paymentEvents.RecordEvent(txCtx, domain.PaymentEvent{
 				PaymentID: payment.ID,
 				EventType: "security.provider_id_mismatch",
 				Metadata:  fmt.Sprintf(`{"expected":%q,"got":%q}`, payment.ProviderPaymentID, payload.ProviderPaymentID),
@@ -556,7 +555,7 @@ func (s *PaymentService) ProcessWebhook(ctx context.Context, rawBody []byte, sig
 				slog.String("payment_currency", payment.Currency),
 			)
 			if s.securityEvents != nil {
-				if secErr := s.securityEvents.RecordSecurityEventTx(txCtx, tx, domain.SecurityEvent{
+				if secErr := s.securityEvents.RecordSecurityEvent(txCtx, domain.SecurityEvent{
 					PaymentID: &payment.ID,
 					EventType: "security.amount_mismatch",
 					Metadata:  fmt.Sprintf(`{"payment_amount":%d,"webhook_amount":%d,"payment_currency":%q,"webhook_currency":%q}`, payment.AmountMinor, payload.AmountMinor, payment.Currency, payload.Currency),
@@ -564,7 +563,7 @@ func (s *PaymentService) ProcessWebhook(ctx context.Context, rawBody []byte, sig
 					return fmt.Errorf("record security event: %w", secErr)
 				}
 			}
-			if recErr := s.paymentEvents.RecordEventTx(txCtx, tx, domain.PaymentEvent{
+			if recErr := s.paymentEvents.RecordEvent(txCtx, domain.PaymentEvent{
 				PaymentID: payment.ID,
 				EventType: "security.amount_mismatch",
 				Metadata:  fmt.Sprintf(`{"payment_amount":%d,"webhook_amount":%d}`, payment.AmountMinor, payload.AmountMinor),
@@ -579,7 +578,7 @@ func (s *PaymentService) ProcessWebhook(ctx context.Context, rawBody []byte, sig
 		}
 
 		// Загрузка заказа строго через транзакцию
-		order, err := s.orders.GetByIDTx(txCtx, tx, payment.OrderID)
+		order, err := s.orders.GetByID(txCtx, payment.OrderID)
 		if err != nil {
 			return fmt.Errorf("load order %d: %w", payment.OrderID, err)
 		}
@@ -594,7 +593,7 @@ func (s *PaymentService) ProcessWebhook(ctx context.Context, rawBody []byte, sig
 					slog.Int64("payment_id", payment.ID),
 					slog.Int64("order_id", order.ID),
 				)
-				upErr := s.payments.UpdateStatusTx(txCtx, tx, payment.ID, domain.PaymentStatusPending, domain.PaymentStatusSucceeded)
+				upErr := s.payments.UpdateStatus(txCtx, payment.ID, domain.PaymentStatusPending, domain.PaymentStatusSucceeded)
 				if upErr != nil {
 					var uniqErr *domain.ErrUniqueViolation
 					if errors.As(upErr, &uniqErr) {
@@ -606,7 +605,7 @@ func (s *PaymentService) ProcessWebhook(ctx context.Context, rawBody []byte, sig
 						return fmt.Errorf("update duplicate payment status: %w", upErr)
 					}
 				}
-				if recErr := s.paymentEvents.RecordEventTx(txCtx, tx, domain.PaymentEvent{
+				if recErr := s.paymentEvents.RecordEvent(txCtx, domain.PaymentEvent{
 					PaymentID:  payment.ID,
 					EventType:  "payment.duplicate_requires_refund",
 					FromStatus: string(payment.Status),
@@ -629,7 +628,7 @@ func (s *PaymentService) ProcessWebhook(ctx context.Context, rawBody []byte, sig
 					if s.metrics != nil {
 						s.metrics.WebhookLateSuccessTotal.Inc()
 					}
-					if recErr := s.paymentEvents.RecordEventTx(txCtx, tx, domain.PaymentEvent{
+					if recErr := s.paymentEvents.RecordEvent(txCtx, domain.PaymentEvent{
 						PaymentID:  payment.ID,
 						EventType:  "payment.late_success_requires_refund",
 						FromStatus: string(payment.Status),
@@ -642,13 +641,13 @@ func (s *PaymentService) ProcessWebhook(ctx context.Context, rawBody []byte, sig
 				return nil
 			}
 
-			if err := s.payments.UpdateStatusTx(txCtx, tx, payment.ID, domain.PaymentStatusPending, domain.PaymentStatusSucceeded); err != nil {
+			if err := s.payments.UpdateStatus(txCtx, payment.ID, domain.PaymentStatusPending, domain.PaymentStatusSucceeded); err != nil {
 				return fmt.Errorf("update payment status to succeeded: %w", err)
 			}
-			if err := s.orders.UpdateStatusTx(txCtx, tx, order.ID, domain.OrderStatusUnpaid, domain.OrderStatusPaid); err != nil {
+			if err := s.orders.UpdateStatus(txCtx, order.ID, domain.OrderStatusUnpaid, domain.OrderStatusPaid); err != nil {
 				return fmt.Errorf("update order status to paid: %w", err)
 			}
-			if recErr := s.paymentEvents.RecordEventTx(txCtx, tx, domain.PaymentEvent{
+			if recErr := s.paymentEvents.RecordEvent(txCtx, domain.PaymentEvent{
 				PaymentID:  payment.ID,
 				EventType:  "payment.succeeded",
 				FromStatus: string(domain.PaymentStatusPending),
@@ -666,10 +665,10 @@ func (s *PaymentService) ProcessWebhook(ctx context.Context, rawBody []byte, sig
 			if !payment.Status.CanTransitionTo(domain.PaymentStatusFailed) {
 				return nil
 			}
-			if err := s.payments.UpdateStatusTx(txCtx, tx, payment.ID, domain.PaymentStatusPending, domain.PaymentStatusFailed); err != nil {
+			if err := s.payments.UpdateStatus(txCtx, payment.ID, domain.PaymentStatusPending, domain.PaymentStatusFailed); err != nil {
 				return fmt.Errorf("update payment status to failed: %w", err)
 			}
-			if recErr := s.paymentEvents.RecordEventTx(txCtx, tx, domain.PaymentEvent{
+			if recErr := s.paymentEvents.RecordEvent(txCtx, domain.PaymentEvent{
 				PaymentID:  payment.ID,
 				EventType:  "payment.failed",
 				FromStatus: string(domain.PaymentStatusPending),
@@ -687,10 +686,10 @@ func (s *PaymentService) ProcessWebhook(ctx context.Context, rawBody []byte, sig
 			if !payment.Status.CanTransitionTo(domain.PaymentStatusCanceled) {
 				return nil
 			}
-			if err := s.payments.UpdateStatusTx(txCtx, tx, payment.ID, domain.PaymentStatusPending, domain.PaymentStatusCanceled); err != nil {
+			if err := s.payments.UpdateStatus(txCtx, payment.ID, domain.PaymentStatusPending, domain.PaymentStatusCanceled); err != nil {
 				return fmt.Errorf("update payment status to canceled: %w", err)
 			}
-			if recErr := s.paymentEvents.RecordEventTx(txCtx, tx, domain.PaymentEvent{
+			if recErr := s.paymentEvents.RecordEvent(txCtx, domain.PaymentEvent{
 				PaymentID:  payment.ID,
 				EventType:  "payment.canceled",
 				FromStatus: string(domain.PaymentStatusPending),

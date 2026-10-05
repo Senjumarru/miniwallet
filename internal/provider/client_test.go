@@ -399,3 +399,70 @@ func TestProvider_RetryBudgetExhausted(t *testing.T) {
 		t.Fatalf("expected quick termination without waiting full backoff, elapsed: %v", elapsed)
 	}
 }
+
+func TestClient_GetPaymentStatus_BodySizeLimitExceeded(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// Send 100 KB payload (exceeding 64 KB limit) with JSON only at the very end
+		bigData := make([]byte, 100*1024)
+		for i := range bigData {
+			bigData[i] = ' '
+		}
+		copy(bigData[len(bigData)-22:], []byte(`{"status":"succeeded"}`))
+		_, _ = w.Write(bigData)
+	}))
+	defer server.Close()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	client := provider.NewClient(
+		server.URL,
+		server.Client(),
+		logger,
+		500*time.Millisecond,
+		1,
+		5*time.Millisecond,
+		20*time.Millisecond,
+	)
+
+	status, err := client.GetPaymentStatus(context.Background(), "lookup-large-1")
+	if err == nil {
+		t.Fatalf("expected error due to exceeded body size limit, got status: %v", status)
+	}
+}
+
+func TestClient_CreateCheckoutSession_BodySizeLimitExceeded(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		bigData := make([]byte, 100*1024)
+		for i := range bigData {
+			bigData[i] = ' '
+		}
+		copy(bigData[len(bigData)-70:], []byte(`{"provider_payment_id":"ch_123","checkout_url":"https://fake/pay"}`))
+		_, _ = w.Write(bigData)
+	}))
+	defer server.Close()
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	client := provider.NewClient(
+		server.URL,
+		server.Client(),
+		logger,
+		500*time.Millisecond,
+		1,
+		5*time.Millisecond,
+		20*time.Millisecond,
+	)
+
+	_, err := client.CreateCheckoutSession(context.Background(), provider.CreateCheckoutInput{
+		PaymentID:      1,
+		OrderID:        10,
+		AmountMinor:    1000,
+		Currency:       "KZT",
+		IdempotencyKey: "test-limit-key-1",
+	})
+	if err == nil {
+		t.Fatal("expected error due to exceeded body size limit on CreateCheckoutSession, got nil")
+	}
+}

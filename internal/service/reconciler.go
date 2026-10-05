@@ -2,12 +2,13 @@ package service
 
 import (
 	"context"
-	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/Senjumarru/miniwallet/internal/domain"
+	"github.com/Senjumarru/miniwallet/internal/metrics"
 	"github.com/Senjumarru/miniwallet/internal/provider"
 )
 
@@ -25,6 +26,7 @@ type Reconciler struct {
 	provider      provider.PaymentProvider
 	logger        *slog.Logger
 	clock         domain.Clock
+	metrics       *metrics.Metrics
 	cfg           ReconcilerConfig
 }
 
@@ -60,6 +62,10 @@ func NewReconciler(
 
 func (r *Reconciler) SetClock(clock domain.Clock) {
 	r.clock = clock
+}
+
+func (r *Reconciler) SetMetrics(m *metrics.Metrics) {
+	r.metrics = m
 }
 
 func (r *Reconciler) now() time.Time {
@@ -137,26 +143,70 @@ func (r *Reconciler) reconcilePayment(ctx context.Context, p *domain.Payment) er
 
 	provStatus, err := r.provider.GetPaymentStatus(ctx, lookupID)
 	if err != nil {
+		if errors.Is(err, provider.ErrProviderPaymentUnknown) {
+			r.logger.WarnContext(ctx, "reconciliation: payment unknown to provider (404), keeping pending",
+				slog.Int64("payment_id", p.ID),
+				slog.Int64("order_id", p.OrderID),
+				slog.String("lookup_id", lookupID),
+			)
+			if r.metrics != nil {
+				r.metrics.ReconcilerUnknownPaymentsTotal.Inc()
+			}
+			return nil
+		}
 		// Ошибка обращения к провайдеру: НЕ переводим в failed, оставляем pending для следующей сверки
 		return fmt.Errorf("check provider status for %s: %w", lookupID, err)
 	}
 
-	return r.txManager.WithinTransaction(ctx, func(txCtx context.Context, tx *sql.Tx) error {
+	return r.txManager.WithinTransaction(ctx, func(txCtx context.Context) error {
 		switch provStatus {
 		case domain.PaymentStatusSucceeded:
 			// Если сессия не была привязана, привязываем
 			if p.ProviderPaymentID == "" {
-				if err := r.payments.UpdateSessionTx(txCtx, tx, p.ID, lookupID, p.CheckoutURL); err != nil {
+				if err := r.payments.UpdateSession(txCtx, p.ID, lookupID, p.CheckoutURL); err != nil {
 					return fmt.Errorf("attach provider payment id: %w", err)
 				}
 			}
-			if err := r.payments.UpdateStatusTx(txCtx, tx, p.ID, domain.PaymentStatusPending, domain.PaymentStatusSucceeded); err != nil {
+
+			// Проверяем статус заказа
+			order, err := r.orders.GetByID(txCtx, p.OrderID)
+			if err != nil {
+				return fmt.Errorf("load order %d: %w", p.OrderID, err)
+			}
+
+			if order.Status == domain.OrderStatusPaid {
+				r.logger.WarnContext(txCtx, "order already paid; duplicate reconciled payment requires refund",
+					slog.Int64("payment_id", p.ID),
+					slog.Int64("order_id", order.ID),
+				)
+				upErr := r.payments.UpdateStatus(txCtx, p.ID, domain.PaymentStatusPending, domain.PaymentStatusSucceeded)
+				if upErr != nil {
+					var uniqErr *domain.ErrUniqueViolation
+					if errors.As(upErr, &uniqErr) {
+						r.logger.WarnContext(txCtx, "duplicate succeeded payment unique index conflict handled",
+							slog.Int64("payment_id", p.ID),
+							slog.Int64("order_id", order.ID),
+						)
+					} else if !errors.Is(upErr, domain.ErrStatusConflict) {
+						return fmt.Errorf("update duplicate payment status: %w", upErr)
+					}
+				}
+				return r.paymentEvents.RecordEvent(txCtx, domain.PaymentEvent{
+					PaymentID:  p.ID,
+					EventType:  "reconciliation.duplicate_requires_refund",
+					FromStatus: string(domain.PaymentStatusPending),
+					ToStatus:   string(domain.PaymentStatusSucceeded),
+					Metadata:   fmt.Sprintf(`{"order_id":%d,"lookup_id":%q,"alert":"duplicate_payment_for_paid_order"}`, order.ID, lookupID),
+				})
+			}
+
+			if err := r.payments.UpdateStatus(txCtx, p.ID, domain.PaymentStatusPending, domain.PaymentStatusSucceeded); err != nil {
 				return err
 			}
-			if err := r.orders.UpdateStatusTx(txCtx, tx, p.OrderID, domain.OrderStatusUnpaid, domain.OrderStatusPaid); err != nil {
+			if err := r.orders.UpdateStatus(txCtx, p.OrderID, domain.OrderStatusUnpaid, domain.OrderStatusPaid); err != nil {
 				return err
 			}
-			return r.paymentEvents.RecordEventTx(txCtx, tx, domain.PaymentEvent{
+			return r.paymentEvents.RecordEvent(txCtx, domain.PaymentEvent{
 				PaymentID:  p.ID,
 				EventType:  "reconciliation.provider_succeeded",
 				FromStatus: string(domain.PaymentStatusPending),
@@ -166,10 +216,10 @@ func (r *Reconciler) reconcilePayment(ctx context.Context, p *domain.Payment) er
 
 		case domain.PaymentStatusFailed, domain.PaymentStatusCanceled:
 			targetStatus := provStatus
-			if err := r.payments.UpdateStatusTx(txCtx, tx, p.ID, domain.PaymentStatusPending, targetStatus); err != nil {
+			if err := r.payments.UpdateStatus(txCtx, p.ID, domain.PaymentStatusPending, targetStatus); err != nil {
 				return err
 			}
-			return r.paymentEvents.RecordEventTx(txCtx, tx, domain.PaymentEvent{
+			return r.paymentEvents.RecordEvent(txCtx, domain.PaymentEvent{
 				PaymentID:  p.ID,
 				EventType:  fmt.Sprintf("reconciliation.provider_%s", targetStatus),
 				FromStatus: string(domain.PaymentStatusPending),
@@ -180,10 +230,10 @@ func (r *Reconciler) reconcilePayment(ctx context.Context, p *domain.Payment) er
 		default:
 			// Провайдер всё ещё сообщает pending, но локальный TTL истёк
 			// TODO(docs): API провайдера для отмены сессии по истечении TTL / сессия провайдера не живёт дольше TTL.
-			if err := r.payments.UpdateStatusTx(txCtx, tx, p.ID, domain.PaymentStatusPending, domain.PaymentStatusFailed); err != nil {
+			if err := r.payments.UpdateStatus(txCtx, p.ID, domain.PaymentStatusPending, domain.PaymentStatusFailed); err != nil {
 				return err
 			}
-			return r.paymentEvents.RecordEventTx(txCtx, tx, domain.PaymentEvent{
+			return r.paymentEvents.RecordEvent(txCtx, domain.PaymentEvent{
 				PaymentID:  p.ID,
 				EventType:  "reconciliation.expired",
 				FromStatus: string(domain.PaymentStatusPending),

@@ -1,160 +1,87 @@
-### MiniWallet — проверка API
-### Расширение: REST Client (humao.rest-client) для VS Code.
+### MiniWallet Payment Service — API Manual Tests
+### REST Client (humao.rest-client) for VS Code / IDE
 
 @host = http://localhost:8080
-@token = PASTE_TOKEN_FROM_LOGIN_HERE
+# Dev JWT token (generate using test or jwt.io with HS256 and dev secret):
+@token = PASTE_DEV_JWT_TOKEN_HERE
 
-### 0. Health — сервис жив
+### 1. Health & Readiness Checks
 GET {{host}}/health
 
-### 1.1 Регистрация Alice
-POST {{host}}/auth/register
+### 1.1 Liveness Probe
+GET {{host}}/healthz
+
+### 1.2 Readiness Probe (Checks SQLite DB connectivity)
+GET {{host}}/readyz
+
+### 1.3 Prometheus Metrics
+GET {{host}}/metrics
+
+### 2. Create Payment (Order amount taken strictly from DB)
+# Invariant 1: Amount and currency are taken from DB order, user from JWT.
+# Invariant 3: Maximum 1 pending payment per order.
+# Invariant 4: IdempotencyKey is required and unique per user.
+POST {{host}}/payments
 Content-Type: application/json
-
-{
-  "email": "alinursarsekov@gmail.com",
-  "password": "password123"
-}
-
-### 1.2 Регистрация Bob
-POST {{host}}/auth/register
-Content-Type: application/json
-
-{
-  "email": "bob@example.kz",
-  "password": "password123"
-}
-
-### 1.3 Дубликат email — 409 email_taken
-POST {{host}}/auth/register
-Content-Type: application/json
-
-{
-  "email": "alinursarsekov@gmail.com",
-  "password": "password123"
-}
-
-### 1.4 Короткий пароль — 400 weak_password
-POST {{host}}/auth/register
-Content-Type: application/json
-
-{
-  "email": "eve@example.kz",
-  "password": "short"
-}
-
-### 2.1 Логин Alice — скопируй token из ответа в @token сверху
-POST {{host}}/auth/login
-Content-Type: application/json
-
-{
-  "email": "alice@example.kz",
-  "password": "password123"
-}
-
-### 2.2 Логин с неверным паролем — 401
-POST {{host}}/auth/login
-Content-Type: application/json
-
-{
-  "email": "alice@example.kz",
-  "password": "wrong-password"
-}
-
-### 3.1 Мой баланс (JWT)
-GET {{host}}/accounts/me
 Authorization: Bearer {{token}}
+Idempotency-Key: manual-payment-req-001
 
-### 3.2 Без токена — 401
-GET {{host}}/accounts/me
+{
+  "order_id": 1
+}
 
-### 4.1 Пополнение на 1000.50 KZT = 100050 тиынов
-POST {{host}}/accounts/deposit
+### 2.1 Idempotent Replay (Same key returns cached payment)
+POST {{host}}/payments
+Content-Type: application/json
+Authorization: Bearer {{token}}
+Idempotency-Key: manual-payment-req-001
+
+{
+  "order_id": 1
+}
+
+### 2.2 Idempotency Conflict (Same key, different payload)
+POST {{host}}/payments
+Content-Type: application/json
+Authorization: Bearer {{token}}
+Idempotency-Key: manual-payment-req-001
+
+{
+  "order_id": 2
+}
+
+### 2.3 Missing Idempotency-Key header -> 400
+POST {{host}}/payments
 Content-Type: application/json
 Authorization: Bearer {{token}}
 
 {
-  "amount": 100050
+  "order_id": 1
 }
 
-### 4.2 Нулевая сумма — 400
-POST {{host}}/accounts/deposit
+### 2.4 Missing Authorization header -> 401
+POST {{host}}/payments
 Content-Type: application/json
-Authorization: Bearer {{token}}
+Idempotency-Key: unauth-req-001
 
 {
-  "amount": 0
+  "order_id": 1
 }
 
-### 5.1 Перевод Bob'у 300 тиынов (Idempotency-Key обязателен!)
-POST {{host}}/transfers
+### 3. Provider Webhook Notification
+# Signature: HMAC-SHA256(timestamp + "." + body, WEBHOOK_SECRET)
+# X-Timestamp: Unix timestamp in seconds (within ±5 minutes window)
+# X-Signature: Hex-encoded HMAC signature
+POST {{host}}/webhooks/provider
 Content-Type: application/json
-Authorization: Bearer {{token}}
-Idempotency-Key: my-first-transfer-001
+X-Timestamp: 1775376000
+X-Signature: PASTE_HEX_HMAC_SIGNATURE_HERE
 
 {
-  "to_email": "bob@example.kz",
-  "amount": 300
+  "event_id": "evt_manual_001",
+  "event_type": "payment.succeeded",
+  "payment_id": 1,
+  "provider_payment_id": "ch_manual_123",
+  "amount_minor": 50000,
+  "currency": "KZT"
 }
-
-### 5.2 Повтор с тем же ключом — вернётся тот же перевод (idempotent_replay: true)
-POST {{host}}/transfers
-Content-Type: application/json
-Authorization: Bearer {{token}}
-Idempotency-Key: my-first-transfer-001
-
-{
-  "to_email": "bob@example.kz",
-  "amount": 300
-}
-
-### 5.3 Тот же ключ, другая сумма — 409 idempotency_conflict
-POST {{host}}/transfers
-Content-Type: application/json
-Authorization: Bearer {{token}}
-Idempotency-Key: my-first-transfer-001
-
-{
-  "to_email": "bob@example.kz",
-  "amount": 500
-}
-
-### 5.4 Без ключа — 400 idempotency_key_required
-POST {{host}}/transfers
-Content-Type: application/json
-Authorization: Bearer {{token}}
-
-{
-  "to_email": "bob@example.kz",
-  "amount": 100
-}
-
-### 5.5 Перевод самому себе — 400
-POST {{host}}/transfers
-Content-Type: application/json
-Authorization: Bearer {{token}}
-Idempotency-Key: self-001
-
-{
-  "to_email": "alice@example.kz",
-  "amount": 100
-}
-
-### 5.6 Больше, чем есть на счету — 422 insufficient_funds
-POST {{host}}/transfers
-Content-Type: application/json
-Authorization: Bearer {{token}}
-Idempotency-Key: big-001
-
-{
-  "to_email": "bob@example.kz",
-  "amount": 99999999
-}
-
-### 6.1 История операций (первые 20)
-GET {{host}}/transactions?limit=20&offset=0
-Authorization: Bearer {{token}}
-
-### 6.2 Пагинация: вторая страница по 2 записи
-GET {{host}}/transactions?limit=2&offset=2
-Authorization: Bearer {{token}}

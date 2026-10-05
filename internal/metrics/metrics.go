@@ -6,14 +6,15 @@ import (
 )
 
 type Metrics struct {
-	PaymentsTotal            *prometheus.CounterVec
-	ProviderRequestDuration  prometheus.Histogram
-	ProviderRetriesTotal     prometheus.Counter
-	WebhookInvalidSignatures prometheus.Counter
-	WebhookLateSuccessTotal  prometheus.Counter
-	WebhookMismatchTotal     *prometheus.CounterVec
-	CircuitBreakerState      prometheus.Gauge
-	PaymentsPendingCount     prometheus.Gauge
+	PaymentsTotal                  *prometheus.CounterVec
+	ProviderRequestDuration        prometheus.Histogram
+	ProviderRetriesTotal           prometheus.Counter
+	WebhookInvalidSignatures       prometheus.Counter
+	WebhookLateSuccessTotal        prometheus.Counter
+	WebhookMismatchTotal           *prometheus.CounterVec
+	CircuitBreakerState            prometheus.Gauge
+	PaymentsPendingCount           prometheus.Gauge
+	ReconcilerUnknownPaymentsTotal prometheus.Counter
 }
 
 func NewMetrics(reg prometheus.Registerer) *Metrics {
@@ -85,6 +86,14 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 				Subsystem: "payments",
 				Name:      "pending_count",
 				Help:      "Current count of active pending payments",
+			},
+		),
+		ReconcilerUnknownPaymentsTotal: factory.NewCounter(
+			prometheus.CounterOpts{
+				Namespace: "miniwallet",
+				Subsystem: "reconciler",
+				Name:      "unknown_payments_total",
+				Help:      "Total count of pending payments unknown to provider during reconciliation (404)",
 			},
 		),
 	}

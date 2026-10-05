@@ -5,10 +5,12 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
 
+	"github.com/Senjumarru/miniwallet/internal/domain"
 	_ "modernc.org/sqlite"
 )
 
@@ -59,13 +61,77 @@ func (s *Storage) Webhooks() *WebhookEventRepository        { return NewWebhookE
 func (s *Storage) PaymentEvents() *PaymentEventRepository   { return NewPaymentEventRepository(s.db) }
 func (s *Storage) SecurityEvents() *SecurityEventRepository { return NewSecurityEventRepository(s.db) }
 
-func (s *Storage) WithinTransaction(ctx context.Context, fn func(txCtx context.Context, tx *sql.Tx) error) error {
+func (s *Storage) SeedUser(u *domain.User) {
+	isBlocked := 0
+	if u.IsBlocked {
+		isBlocked = 1
+	}
+	isActive := 1
+	if !u.IsActive {
+		isActive = 0
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO users (id, email, is_active, is_blocked)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			email = excluded.email,
+			is_active = excluded.is_active,
+			is_blocked = excluded.is_blocked`,
+		u.ID, u.Email, isActive, isBlocked)
+	if err != nil {
+		slog.Error("seed user failed", slog.String("error", err.Error()), slog.Int64("user_id", u.ID))
+	}
+}
+
+func (s *Storage) SeedOrder(o *domain.Order) {
+	status := string(o.Status)
+	if status == "" {
+		status = "unpaid"
+	}
+	curr := o.Currency
+	if curr == "" {
+		curr = "KZT"
+	}
+	_, err := s.db.Exec(`
+		INSERT INTO orders (id, user_id, amount_minor, currency, status)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			user_id = excluded.user_id,
+			amount_minor = excluded.amount_minor,
+			currency = excluded.currency,
+			status = excluded.status`,
+		o.ID, o.UserID, o.AmountMinor, curr, status)
+	if err != nil {
+		slog.Error("seed order failed", slog.String("error", err.Error()), slog.Int64("order_id", o.ID))
+	}
+}
+
+type txContextKey struct{}
+
+// ContextWithTx injects an active SQL transaction into context.
+func ContextWithTx(ctx context.Context, tx *sql.Tx) context.Context {
+	return context.WithValue(ctx, txContextKey{}, tx)
+}
+
+// TxFromContext extracts an active SQL transaction from context, or returns nil.
+func TxFromContext(ctx context.Context) *sql.Tx {
+	if ctx == nil {
+		return nil
+	}
+	if tx, ok := ctx.Value(txContextKey{}).(*sql.Tx); ok {
+		return tx
+	}
+	return nil
+}
+
+func (s *Storage) WithinTransaction(ctx context.Context, fn func(txCtx context.Context) error) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
 
-	if err := fn(ctx, tx); err != nil {
+	txCtx := ContextWithTx(ctx, tx)
+	if err := fn(txCtx); err != nil {
 		if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
 			return errors.Join(err, fmt.Errorf("rollback transaction: %w", rbErr))
 		}

@@ -2,7 +2,6 @@ package sqlite_test
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -207,6 +206,67 @@ func TestPaymentRepository_ErrUniqueViolation(t *testing.T) {
 	if !errors.As(errOrder, &uniqOrderErr) || uniqOrderErr.Constraint != "order_pending" {
 		t.Fatalf("expected *domain.ErrUniqueViolation with Constraint 'order_pending', got %v", errOrder)
 	}
+
+	// 3. Foreign key violation (non-existent order) must NOT return ErrUniqueViolation
+	pFK := &domain.Payment{
+		UserID:         1,
+		OrderID:        99999, // non-existent order
+		AmountMinor:    10000,
+		Currency:       "KZT",
+		IdempotencyKey: "key-fk-test-unique",
+		RequestHash:    "hash4",
+	}
+	errFK := payRepo.CreatePending(ctx, pFK)
+	if errFK == nil {
+		t.Fatal("expected error on foreign key violation, got nil")
+	}
+	var uniqFKErr *domain.ErrUniqueViolation
+	if errors.As(errFK, &uniqFKErr) {
+		t.Fatalf("foreign key violation must NOT be ErrUniqueViolation, got %v", errFK)
+	}
+
+	// 4. CHECK constraint violation (amount_minor <= 0) must NOT return ErrUniqueViolation
+	pCheck := &domain.Payment{
+		UserID:         1,
+		OrderID:        20,
+		AmountMinor:    -500, // violates CHECK (amount_minor > 0)
+		Currency:       "KZT",
+		IdempotencyKey: "key-check-test-unique",
+		RequestHash:    "hash5",
+	}
+	errCheck := payRepo.CreatePending(ctx, pCheck)
+	if errCheck == nil {
+		t.Fatal("expected error on check constraint violation, got nil")
+	}
+	var uniqCheckErr *domain.ErrUniqueViolation
+	if errors.As(errCheck, &uniqCheckErr) {
+		t.Fatalf("check constraint violation must NOT be ErrUniqueViolation, got %v", errCheck)
+	}
+
+	// 5. NOT NULL constraint violation (NULL for idempotency_key) must NOT return ErrUniqueViolation
+	_, errNN := store.DB().ExecContext(ctx, `
+		INSERT INTO payments (user_id, order_id, amount_minor, currency, status, idempotency_key, request_hash)
+		VALUES (1, 20, 1000, 'KZT', 'pending', NULL, 'hash')
+	`)
+	if errNN == nil {
+		t.Fatal("expected error on NOT NULL violation, got nil")
+	}
+	classifiedNN := sqlite.ClassifySQLiteError(errNN)
+	var uniqNNErr *domain.ErrUniqueViolation
+	if errors.As(classifiedNN, &uniqNNErr) {
+		t.Fatalf("NOT NULL violation must NOT be ErrUniqueViolation (Invariant 8 whitelist), got %v", classifiedNN)
+	}
+
+	// 6. PRIMARY KEY violation (duplicate user id) must return ErrUniqueViolation (white list)
+	_, errPK := store.DB().ExecContext(ctx, `INSERT INTO users (id, email) VALUES (1, 'duplicate_pk@example.kz')`)
+	if errPK == nil {
+		t.Fatal("expected error on PRIMARY KEY duplicate, got nil")
+	}
+	classifiedPK := sqlite.ClassifySQLiteError(errPK)
+	var uniqPKErr *domain.ErrUniqueViolation
+	if !errors.As(classifiedPK, &uniqPKErr) {
+		t.Fatalf("PRIMARY KEY duplicate must return ErrUniqueViolation (Invariant 8 whitelist), got %v", classifiedPK)
+	}
 }
 
 func TestPaymentRepository_UpdateStatusConflict(t *testing.T) {
@@ -263,19 +323,19 @@ func TestPaymentRepository_UpdateStatusConflict(t *testing.T) {
 		t.Fatalf("expected domain.ErrPaymentNotFound, got %v", errNotFound)
 	}
 
-	// Test order UpdateStatusTx
-	err = store.WithinTransaction(ctx, func(txCtx context.Context, tx *sql.Tx) error {
+	// Test order UpdateStatus within transaction
+	err = store.WithinTransaction(ctx, func(txCtx context.Context) error {
 		// Update order from unpaid to paid
-		if err := orderRepo.UpdateStatusTx(txCtx, tx, 10, domain.OrderStatusUnpaid, domain.OrderStatusPaid); err != nil {
+		if err := orderRepo.UpdateStatus(txCtx, 10, domain.OrderStatusUnpaid, domain.OrderStatusPaid); err != nil {
 			return err
 		}
 		// Try to update again from unpaid to canceled -> must return domain.ErrStatusConflict
-		errOrderConflict := orderRepo.UpdateStatusTx(txCtx, tx, 10, domain.OrderStatusUnpaid, domain.OrderStatusCanceled)
+		errOrderConflict := orderRepo.UpdateStatus(txCtx, 10, domain.OrderStatusUnpaid, domain.OrderStatusCanceled)
 		if !errors.Is(errOrderConflict, domain.ErrStatusConflict) {
 			t.Fatalf("expected domain.ErrStatusConflict for order, got %v", errOrderConflict)
 		}
 		// Non-existent order -> ErrOrderNotFound
-		errOrderNotFound := orderRepo.UpdateStatusTx(txCtx, tx, 888888, domain.OrderStatusUnpaid, domain.OrderStatusPaid)
+		errOrderNotFound := orderRepo.UpdateStatus(txCtx, 888888, domain.OrderStatusUnpaid, domain.OrderStatusPaid)
 		if !errors.Is(errOrderNotFound, domain.ErrOrderNotFound) {
 			t.Fatalf("expected domain.ErrOrderNotFound, got %v", errOrderNotFound)
 		}
@@ -460,7 +520,8 @@ func TestSQLite_Concurrent50WritingTransactions(t *testing.T) {
 			<-startBarrier
 
 			// Each goroutine executes a write transaction with BEGIN IMMEDIATE
-			txErr := store.WithinTransaction(ctx, func(txCtx context.Context, tx *sql.Tx) error {
+			txErr := store.WithinTransaction(ctx, func(txCtx context.Context) error {
+				tx := sqlite.TxFromContext(txCtx)
 				_, execErr := tx.ExecContext(txCtx, `
 					INSERT INTO orders (id, user_id, amount_minor, currency, status)
 					VALUES (?, 1, ?, 'KZT', 'unpaid')`, id, id*100)
