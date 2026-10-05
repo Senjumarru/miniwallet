@@ -75,6 +75,11 @@ func run() error {
 		cfg.MaxRetryDelay,
 	)
 
+	whSecrets := []string{cfg.WebhookSecret}
+	if cfg.WebhookSecretOld != "" {
+		whSecrets = append(whSecrets, cfg.WebhookSecretOld)
+	}
+
 	paymentSvc := service.NewPaymentService(
 		userRepo,
 		orderRepo,
@@ -85,7 +90,7 @@ func run() error {
 		store,
 		providerClient,
 		logger,
-		cfg.WebhookSecret,
+		whSecrets...,
 	)
 
 	// Graceful shutdown context
@@ -119,7 +124,7 @@ func run() error {
 	)
 
 	// 5.3: http.Server с обязательными таймаутами и лимитами заголовков
-	srv := httpapi.NewHTTPServer(net.JoinHostPort("localhost", cfg.Port), handler)
+	srv := httpapi.NewHTTPServer(net.JoinHostPort(cfg.Host, cfg.Port), handler)
 
 	errCh := make(chan error, 1)
 	go func() {

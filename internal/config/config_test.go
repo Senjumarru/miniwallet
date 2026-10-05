@@ -12,8 +12,8 @@ import (
 func clearEnv(t *testing.T) {
 	t.Helper()
 	keys := []string{
-		"JWT_SECRET", "WEBHOOK_SECRET", "APP_ENV", "REQUIRE_SECRETS",
-		"PORT", "DB_PATH", "PROVIDER_BASE_URL", "PROVIDER_TIMEOUT_MS",
+		"JWT_SECRET", "WEBHOOK_SECRET", "WEBHOOK_SECRET_OLD", "APP_ENV", "REQUIRE_SECRETS",
+		"HOST", "PORT", "DB_PATH", "PROVIDER_BASE_URL", "PROVIDER_TIMEOUT_MS",
 		"MAX_RETRY_ATTEMPTS", "LOG_LEVEL",
 	}
 	for _, k := range keys {
@@ -237,4 +237,75 @@ func TestLoad_CustomEnvVariables(t *testing.T) {
 	if cfg.LogLevel != "debug" {
 		t.Errorf("expected debug, got %s", cfg.LogLevel)
 	}
+}
+
+func TestLoad_Host(t *testing.T) {
+	clearEnv(t)
+	os.Setenv("APP_ENV", "dev")
+
+	t.Run("default host is localhost", func(t *testing.T) {
+		cfg, err := config.Load()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.Host != "localhost" {
+			t.Errorf("expected default host localhost, got %s", cfg.Host)
+		}
+	})
+
+	t.Run("custom host from env", func(t *testing.T) {
+		os.Setenv("HOST", "0.0.0.0")
+		cfg, err := config.Load()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.Host != "0.0.0.0" {
+			t.Errorf("expected host 0.0.0.0, got %s", cfg.Host)
+		}
+	})
+}
+
+func TestLoad_WebhookSecretOld(t *testing.T) {
+	clearEnv(t)
+	jwtKey := "strong_production_jwt_secret_key_1234567890_min_32"
+	whKey := "strong_production_webhook_secret_key_1234567890_min_32"
+	validOldKey := "strong_old_webhook_secret_key_1234567890_min_32_old"
+
+	os.Setenv("JWT_SECRET", jwtKey)
+	os.Setenv("WEBHOOK_SECRET", whKey)
+
+	t.Run("valid WEBHOOK_SECRET_OLD loads correctly", func(t *testing.T) {
+		os.Setenv("WEBHOOK_SECRET_OLD", validOldKey)
+		cfg, err := config.Load()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if cfg.WebhookSecretOld != validOldKey {
+			t.Errorf("expected old webhook secret %s, got %s", validOldKey, cfg.WebhookSecretOld)
+		}
+	})
+
+	t.Run("short WEBHOOK_SECRET_OLD rejected in non-dev", func(t *testing.T) {
+		os.Setenv("WEBHOOK_SECRET_OLD", "too_short_old_key_123")
+		_, err := config.Load()
+		if err == nil || !strings.Contains(strings.ToLower(err.Error()), "short") {
+			t.Fatalf("expected error about short WEBHOOK_SECRET_OLD, got: %v", err)
+		}
+	})
+
+	t.Run("identical to WEBHOOK_SECRET rejected", func(t *testing.T) {
+		os.Setenv("WEBHOOK_SECRET_OLD", whKey)
+		_, err := config.Load()
+		if err == nil || !strings.Contains(strings.ToLower(err.Error()), "identical") {
+			t.Fatalf("expected error about identical webhook secrets, got: %v", err)
+		}
+	})
+
+	t.Run("dev value rejected in non-dev", func(t *testing.T) {
+		os.Setenv("WEBHOOK_SECRET_OLD", "dev-webhook-secret-change-me-old-prod")
+		_, err := config.Load()
+		if err == nil || !strings.Contains(strings.ToLower(err.Error()), "dev-value") {
+			t.Fatalf("expected error about dev value in non-dev, got: %v", err)
+		}
+	})
 }

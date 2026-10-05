@@ -10,9 +10,11 @@ import (
 )
 
 type Config struct {
+	Host              string
 	Port              string
 	DBPath            string
 	WebhookSecret     string
+	WebhookSecretOld  string
 	JWTSecret         string
 	ProviderBaseURL   string
 	ProviderTimeout   time.Duration
@@ -27,11 +29,12 @@ func Load() (*Config, error) {
 	appEnv := os.Getenv("APP_ENV")
 	isDev := appEnv == "dev"
 
-	var jwtSec, whSec string
+	var jwtSec, whSec, whSecOld string
 
 	if isDev {
 		jwtSec = getEnv("JWT_SECRET", "dev-jwt-secret-change-me-local-dev-only")
 		whSec = getEnv("WEBHOOK_SECRET", "dev-webhook-secret-change-me-local-dev-only")
+		whSecOld = os.Getenv("WEBHOOK_SECRET_OLD")
 	} else {
 		// Инвариант 7: Секреты без значений по умолчанию: отказ запуска при пустых, коротких
 		// (<32 байт), dev-значениях или одинаковых секретах. Небезопасный режим только при явном APP_ENV=dev.
@@ -60,12 +63,30 @@ func Load() (*Config, error) {
 		if jwtSec == whSec {
 			return nil, errors.New("JWT_SECRET and WEBHOOK_SECRET must not be identical")
 		}
+
+		whSecOld = os.Getenv("WEBHOOK_SECRET_OLD")
+		if whSecOld != "" {
+			if len([]byte(whSecOld)) < 32 {
+				return nil, fmt.Errorf("WEBHOOK_SECRET_OLD is too short: must be at least 32 bytes (got %d)", len([]byte(whSecOld)))
+			}
+			if isDevSecret(whSecOld) {
+				return nil, errors.New("WEBHOOK_SECRET_OLD must not use insecure dev-value in non-dev environment")
+			}
+			if whSecOld == whSec {
+				return nil, errors.New("WEBHOOK_SECRET_OLD and WEBHOOK_SECRET must not be identical")
+			}
+			if whSecOld == jwtSec {
+				return nil, errors.New("WEBHOOK_SECRET_OLD and JWT_SECRET must not be identical")
+			}
+		}
 	}
 
 	cfg := &Config{
+		Host:              getEnv("HOST", "localhost"),
 		Port:              getEnv("PORT", "8080"),
 		DBPath:            getEnv("DB_PATH", "wallet.db"),
 		WebhookSecret:     whSec,
+		WebhookSecretOld:  whSecOld,
 		JWTSecret:         jwtSec,
 		ProviderBaseURL:   getEnv("PROVIDER_BASE_URL", "http://localhost:8081"),
 		ProviderTimeout:   5 * time.Second,
