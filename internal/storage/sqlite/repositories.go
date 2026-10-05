@@ -51,6 +51,22 @@ func classifySQLiteError(err error) error {
 	return err
 }
 
+type dbExecutor interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func getExecutor(ctx context.Context, db *sql.DB, explicitTx *sql.Tx) dbExecutor {
+	if explicitTx != nil {
+		return explicitTx
+	}
+	if tx := TxFromContext(ctx); tx != nil {
+		return tx
+	}
+	return db
+}
+
 type UserRepository struct {
 	db *sql.DB
 }
@@ -60,7 +76,8 @@ func NewUserRepository(db *sql.DB) *UserRepository {
 }
 
 func (r *UserRepository) GetByID(ctx context.Context, id int64) (*domain.User, error) {
-	row := r.db.QueryRowContext(ctx, `
+	exec := getExecutor(ctx, r.db, nil)
+	row := exec.QueryRowContext(ctx, `
 			SELECT id, email, is_active, is_blocked, created_at
 			FROM users
 			WHERE id = ?`, id)
@@ -95,16 +112,12 @@ func NewOrderRepository(db *sql.DB) *OrderRepository {
 }
 
 func (r *OrderRepository) GetByID(ctx context.Context, id int64) (*domain.Order, error) {
-	row := r.db.QueryRowContext(ctx, `
-			SELECT id, user_id, amount_minor, currency, status, created_at, updated_at
-			FROM orders
-			WHERE id = ?`, id)
-
-	return scanOrder(row)
+	return r.GetByIDTx(ctx, nil, id)
 }
 
 func (r *OrderRepository) GetByIDTx(ctx context.Context, tx *sql.Tx, id int64) (*domain.Order, error) {
-	row := tx.QueryRowContext(ctx, `
+	exec := getExecutor(ctx, r.db, tx)
+	row := exec.QueryRowContext(ctx, `
 			SELECT id, user_id, amount_minor, currency, status, created_at, updated_at
 			FROM orders
 			WHERE id = ?`, id)
@@ -112,8 +125,13 @@ func (r *OrderRepository) GetByIDTx(ctx context.Context, tx *sql.Tx, id int64) (
 	return scanOrder(row)
 }
 
+func (r *OrderRepository) UpdateStatus(ctx context.Context, orderID int64, fromStatus, toStatus domain.OrderStatus) error {
+	return r.UpdateStatusTx(ctx, nil, orderID, fromStatus, toStatus)
+}
+
 func (r *OrderRepository) UpdateStatusTx(ctx context.Context, tx *sql.Tx, orderID int64, fromStatus, toStatus domain.OrderStatus) error {
-	res, err := tx.ExecContext(ctx, `
+	exec := getExecutor(ctx, r.db, tx)
+	res, err := exec.ExecContext(ctx, `
 			UPDATE orders
 			SET status = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 			WHERE id = ? AND status = ?`,
@@ -128,7 +146,7 @@ func (r *OrderRepository) UpdateStatusTx(ctx context.Context, tx *sql.Tx, orderI
 	}
 	if affected == 0 {
 		var dummy int64
-		checkErr := tx.QueryRowContext(ctx, "SELECT id FROM orders WHERE id = ?", orderID).Scan(&dummy)
+		checkErr := exec.QueryRowContext(ctx, "SELECT id FROM orders WHERE id = ?", orderID).Scan(&dummy)
 		if checkErr != nil {
 			if errors.Is(checkErr, sql.ErrNoRows) {
 				return domain.ErrOrderNotFound
@@ -149,18 +167,12 @@ func NewPaymentRepository(db *sql.DB) *PaymentRepository {
 }
 
 func (r *PaymentRepository) GetByID(ctx context.Context, id int64) (*domain.Payment, error) {
-	row := r.db.QueryRowContext(ctx, `
-			SELECT id, user_id, order_id, amount_minor, currency, status,
-				idempotency_key, request_hash, provider_payment_id, checkout_url,
-				created_at, updated_at
-			FROM payments
-			WHERE id = ?`, id)
-
-	return scanPayment(row)
+	return r.GetByIDTx(ctx, nil, id)
 }
 
 func (r *PaymentRepository) GetByIDTx(ctx context.Context, tx *sql.Tx, id int64) (*domain.Payment, error) {
-	row := tx.QueryRowContext(ctx, `
+	exec := getExecutor(ctx, r.db, tx)
+	row := exec.QueryRowContext(ctx, `
 			SELECT id, user_id, order_id, amount_minor, currency, status,
 				idempotency_key, request_hash, provider_payment_id, checkout_url,
 				created_at, updated_at
@@ -171,7 +183,8 @@ func (r *PaymentRepository) GetByIDTx(ctx context.Context, tx *sql.Tx, id int64)
 }
 
 func (r *PaymentRepository) GetByIdempotencyKey(ctx context.Context, userID int64, key string) (*domain.Payment, error) {
-	row := r.db.QueryRowContext(ctx, `
+	exec := getExecutor(ctx, r.db, nil)
+	row := exec.QueryRowContext(ctx, `
 			SELECT id, user_id, order_id, amount_minor, currency, status,
 				idempotency_key, request_hash, provider_payment_id, checkout_url,
 				created_at, updated_at
@@ -182,7 +195,8 @@ func (r *PaymentRepository) GetByIdempotencyKey(ctx context.Context, userID int6
 }
 
 func (r *PaymentRepository) GetActivePendingByOrderID(ctx context.Context, orderID int64) (*domain.Payment, error) {
-	row := r.db.QueryRowContext(ctx, `
+	exec := getExecutor(ctx, r.db, nil)
+	row := exec.QueryRowContext(ctx, `
 			SELECT id, user_id, order_id, amount_minor, currency, status,
 				idempotency_key, request_hash, provider_payment_id, checkout_url,
 				created_at, updated_at
@@ -197,7 +211,8 @@ func (r *PaymentRepository) GetPendingOlderThan(ctx context.Context, olderThan t
 		limit = 50
 	}
 	formatted := olderThan.UTC().Format("2006-01-02T15:04:05.000Z")
-	rows, err := r.db.QueryContext(ctx, `
+	exec := getExecutor(ctx, r.db, nil)
+	rows, err := exec.QueryContext(ctx, `
 			SELECT id, user_id, order_id, amount_minor, currency, status,
 				idempotency_key, request_hash, provider_payment_id, checkout_url,
 				created_at, updated_at
@@ -247,7 +262,8 @@ func (r *PaymentRepository) CreatePending(ctx context.Context, p *domain.Payment
 		args = append(args, createdFormatted, updatedFormatted)
 	}
 
-	res, err := r.db.ExecContext(ctx, query, args...)
+	exec := getExecutor(ctx, r.db, nil)
+	res, err := exec.ExecContext(ctx, query, args...)
 	if err != nil {
 		if classified := classifySQLiteError(err); classified != err {
 			return classified
@@ -268,17 +284,12 @@ func (r *PaymentRepository) UpdateSession(ctx context.Context, paymentID int64, 
 }
 
 func (r *PaymentRepository) UpdateSessionTx(ctx context.Context, tx *sql.Tx, paymentID int64, providerPaymentID, checkoutURL string) error {
+	exec := getExecutor(ctx, r.db, tx)
 	query := `
 			UPDATE payments
 			SET provider_payment_id = ?, checkout_url = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 			WHERE id = ? AND status = 'pending'`
-	var res sql.Result
-	var err error
-	if tx != nil {
-		res, err = tx.ExecContext(ctx, query, providerPaymentID, checkoutURL, paymentID)
-	} else {
-		res, err = r.db.ExecContext(ctx, query, providerPaymentID, checkoutURL, paymentID)
-	}
+	res, err := exec.ExecContext(ctx, query, providerPaymentID, checkoutURL, paymentID)
 	if err != nil {
 		return fmt.Errorf("update session: %w", err)
 	}
@@ -288,12 +299,7 @@ func (r *PaymentRepository) UpdateSessionTx(ctx context.Context, tx *sql.Tx, pay
 	}
 	if affected == 0 {
 		var status string
-		var checkErr error
-		if tx != nil {
-			checkErr = tx.QueryRowContext(ctx, "SELECT status FROM payments WHERE id = ?", paymentID).Scan(&status)
-		} else {
-			checkErr = r.db.QueryRowContext(ctx, "SELECT status FROM payments WHERE id = ?", paymentID).Scan(&status)
-		}
+		checkErr := exec.QueryRowContext(ctx, "SELECT status FROM payments WHERE id = ?", paymentID).Scan(&status)
 		if checkErr != nil {
 			if errors.Is(checkErr, sql.ErrNoRows) {
 				return domain.ErrPaymentNotFound
@@ -306,38 +312,12 @@ func (r *PaymentRepository) UpdateSessionTx(ctx context.Context, tx *sql.Tx, pay
 }
 
 func (r *PaymentRepository) UpdateStatus(ctx context.Context, paymentID int64, fromStatus, toStatus domain.PaymentStatus) error {
-	res, err := r.db.ExecContext(ctx, `
-			UPDATE payments
-			SET status = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-			WHERE id = ? AND status = ?`,
-		string(toStatus), paymentID, string(fromStatus))
-	if err != nil {
-		if classified := classifySQLiteError(err); classified != err {
-			return classified
-		}
-		return fmt.Errorf("update payment status: %w", err)
-	}
-
-	affected, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("check affected rows: %w", err)
-	}
-	if affected == 0 {
-		var dummy int64
-		checkErr := r.db.QueryRowContext(ctx, "SELECT id FROM payments WHERE id = ?", paymentID).Scan(&dummy)
-		if checkErr != nil {
-			if errors.Is(checkErr, sql.ErrNoRows) {
-				return domain.ErrPaymentNotFound
-			}
-			return fmt.Errorf("check payment existence: %w", checkErr)
-		}
-		return domain.ErrStatusConflict
-	}
-	return nil
+	return r.UpdateStatusTx(ctx, nil, paymentID, fromStatus, toStatus)
 }
 
 func (r *PaymentRepository) UpdateStatusTx(ctx context.Context, tx *sql.Tx, paymentID int64, fromStatus, toStatus domain.PaymentStatus) error {
-	res, err := tx.ExecContext(ctx, `
+	exec := getExecutor(ctx, r.db, tx)
+	res, err := exec.ExecContext(ctx, `
 			UPDATE payments
 			SET status = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 			WHERE id = ? AND status = ?`,
@@ -355,7 +335,7 @@ func (r *PaymentRepository) UpdateStatusTx(ctx context.Context, tx *sql.Tx, paym
 	}
 	if affected == 0 {
 		var dummy int64
-		checkErr := tx.QueryRowContext(ctx, "SELECT id FROM payments WHERE id = ?", paymentID).Scan(&dummy)
+		checkErr := exec.QueryRowContext(ctx, "SELECT id FROM payments WHERE id = ?", paymentID).Scan(&dummy)
 		if checkErr != nil {
 			if errors.Is(checkErr, sql.ErrNoRows) {
 				return domain.ErrPaymentNotFound
@@ -375,19 +355,18 @@ func NewWebhookEventRepository(db *sql.DB) *WebhookEventRepository {
 	return &WebhookEventRepository{db: db}
 }
 
+func (r *WebhookEventRepository) RecordEvent(ctx context.Context, eventID, eventType string, payload []byte) (bool, error) {
+	return r.RecordEventTx(ctx, nil, eventID, eventType, payload)
+}
+
 func (r *WebhookEventRepository) RecordEventTx(ctx context.Context, tx *sql.Tx, eventID, eventType string, payload []byte) (bool, error) {
+	exec := getExecutor(ctx, r.db, tx)
 	query := `
 			INSERT INTO webhook_events (event_id, event_type, payload)
 			VALUES (?, ?, ?)
 			ON CONFLICT(event_id) DO NOTHING`
 
-	var res sql.Result
-	var err error
-	if tx != nil {
-		res, err = tx.ExecContext(ctx, query, eventID, eventType, string(payload))
-	} else {
-		res, err = r.db.ExecContext(ctx, query, eventID, eventType, string(payload))
-	}
+	res, err := exec.ExecContext(ctx, query, eventID, eventType, string(payload))
 	if err != nil {
 		return false, fmt.Errorf("insert webhook event: %w", err)
 	}
@@ -410,16 +389,16 @@ func NewPaymentEventRepository(db *sql.DB) *PaymentEventRepository {
 	return &PaymentEventRepository{db: db}
 }
 
+func (r *PaymentEventRepository) RecordEvent(ctx context.Context, e domain.PaymentEvent) error {
+	return r.RecordEventTx(ctx, nil, e)
+}
+
 func (r *PaymentEventRepository) RecordEventTx(ctx context.Context, tx *sql.Tx, e domain.PaymentEvent) error {
+	exec := getExecutor(ctx, r.db, tx)
 	query := `
 			INSERT INTO payment_events (payment_id, event_type, from_status, to_status, metadata)
 			VALUES (?, ?, ?, ?, ?)`
-	var err error
-	if tx != nil {
-		_, err = tx.ExecContext(ctx, query, e.PaymentID, e.EventType, e.FromStatus, e.ToStatus, e.Metadata)
-	} else {
-		_, err = r.db.ExecContext(ctx, query, e.PaymentID, e.EventType, e.FromStatus, e.ToStatus, e.Metadata)
-	}
+	_, err := exec.ExecContext(ctx, query, e.PaymentID, e.EventType, e.FromStatus, e.ToStatus, e.Metadata)
 	if err != nil {
 		return fmt.Errorf("insert payment event: %w", err)
 	}
@@ -427,7 +406,8 @@ func (r *PaymentEventRepository) RecordEventTx(ctx context.Context, tx *sql.Tx, 
 }
 
 func (r *PaymentEventRepository) ListByPaymentID(ctx context.Context, paymentID int64) ([]domain.PaymentEvent, error) {
-	rows, err := r.db.QueryContext(ctx, `
+	exec := getExecutor(ctx, r.db, nil)
+	rows, err := exec.QueryContext(ctx, `
 			SELECT id, payment_id, event_type, from_status, to_status, metadata, created_at
 			FROM payment_events
 			WHERE payment_id = ?
@@ -459,7 +439,8 @@ func (r *PaymentEventRepository) ListByPaymentID(ctx context.Context, paymentID 
 }
 
 func (r *PaymentEventRepository) GetManualReviewEvents(ctx context.Context) ([]domain.PaymentEvent, error) {
-	rows, err := r.db.QueryContext(ctx, `
+	exec := getExecutor(ctx, r.db, nil)
+	rows, err := exec.QueryContext(ctx, `
 		SELECT id, payment_id, event_type, COALESCE(from_status, ''), COALESCE(to_status, ''), COALESCE(metadata, ''), created_at
 		FROM payment_events
 		WHERE event_type IN ('payment.late_success_requires_refund', 'payment.duplicate_requires_refund')
@@ -503,6 +484,7 @@ func (r *SecurityEventRepository) RecordSecurityEvent(ctx context.Context, e dom
 }
 
 func (r *SecurityEventRepository) RecordSecurityEventTx(ctx context.Context, tx *sql.Tx, e domain.SecurityEvent) error {
+	exec := getExecutor(ctx, r.db, tx)
 	query := `
 			INSERT INTO security_events (payment_id, event_type, metadata)
 			VALUES (?, ?, ?)`
@@ -510,12 +492,7 @@ func (r *SecurityEventRepository) RecordSecurityEventTx(ctx context.Context, tx 
 	if e.PaymentID != nil {
 		paymentID = sql.NullInt64{Int64: *e.PaymentID, Valid: true}
 	}
-	var err error
-	if tx != nil {
-		_, err = tx.ExecContext(ctx, query, paymentID, e.EventType, e.Metadata)
-	} else {
-		_, err = r.db.ExecContext(ctx, query, paymentID, e.EventType, e.Metadata)
-	}
+	_, err := exec.ExecContext(ctx, query, paymentID, e.EventType, e.Metadata)
 	if err != nil {
 		return fmt.Errorf("insert security event: %w", err)
 	}

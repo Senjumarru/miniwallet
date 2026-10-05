@@ -89,7 +89,7 @@ func (s *Storage) restore(snap *storageSnapshot) {
 	s.nextEventID = snap.nextEventID
 }
 
-func (s *Storage) WithinTransaction(ctx context.Context, fn func(txCtx context.Context, tx *sql.Tx) error) error {
+func (s *Storage) WithinTransaction(ctx context.Context, fn func(txCtx context.Context) error) error {
 	s.txMu.Lock()
 	defer s.txMu.Unlock()
 
@@ -97,7 +97,7 @@ func (s *Storage) WithinTransaction(ctx context.Context, fn func(txCtx context.C
 	snap := s.snapshot()
 	s.mu.Unlock()
 
-	if err := fn(ctx, nil); err != nil {
+	if err := fn(ctx); err != nil {
 		s.mu.Lock()
 		s.restore(snap)
 		s.mu.Unlock()
@@ -201,6 +201,10 @@ func (r *OrderRepo) GetByIDTx(ctx context.Context, tx *sql.Tx, id int64) (*domai
 	}
 	cp := *o
 	return &cp, nil
+}
+
+func (r *OrderRepo) UpdateStatus(ctx context.Context, orderID int64, fromStatus, toStatus domain.OrderStatus) error {
+	return r.UpdateStatusTx(ctx, nil, orderID, fromStatus, toStatus)
 }
 
 func (r *OrderRepo) UpdateStatusTx(ctx context.Context, tx *sql.Tx, orderID int64, fromStatus, toStatus domain.OrderStatus) error {
@@ -355,6 +359,10 @@ func (r *PaymentRepo) UpdateStatusTx(ctx context.Context, tx *sql.Tx, paymentID 
 // WebhookRepo
 type WebhookRepo struct{ s *Storage }
 
+func (r *WebhookRepo) RecordEvent(ctx context.Context, eventID, eventType string, payload []byte) (bool, error) {
+	return r.RecordEventTx(ctx, nil, eventID, eventType, payload)
+}
+
 func (r *WebhookRepo) RecordEventTx(ctx context.Context, tx *sql.Tx, eventID, eventType string, payload []byte) (bool, error) {
 	r.s.mu.Lock()
 	defer r.s.mu.Unlock()
@@ -368,6 +376,10 @@ func (r *WebhookRepo) RecordEventTx(ctx context.Context, tx *sql.Tx, eventID, ev
 
 // PaymentEventRepo
 type PaymentEventRepo struct{ s *Storage }
+
+func (r *PaymentEventRepo) RecordEvent(ctx context.Context, e domain.PaymentEvent) error {
+	return r.RecordEventTx(ctx, nil, e)
+}
 
 func (r *PaymentEventRepo) RecordEventTx(ctx context.Context, tx *sql.Tx, e domain.PaymentEvent) error {
 	r.s.mu.Lock()

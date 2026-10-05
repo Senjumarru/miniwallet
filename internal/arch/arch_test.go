@@ -41,8 +41,6 @@ func TestLayering(t *testing.T) {
 }
 
 func TestServiceDoesNotImportDatabaseSQL(t *testing.T) {
-	t.Skip("known debt: internal/service imports database/sql in interfaces.go, payment.go, reconciler.go for TxManager and *sql.Tx")
-
 	out, err := exec.Command("go", "list", "-f",
 		"{{.ImportPath}} {{join .Imports \" \"}}", mod+"internal/service").Output()
 	if err != nil {

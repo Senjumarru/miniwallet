@@ -4,29 +4,20 @@
 
 ---
 
-## 1. Архитектурный долг: Импорт `database/sql` в слое бизнес-логики (`internal/service`)
+## 1. Архитектурный долг: Импорт `database/sql` в слое бизнес-логики (`internal/service`) [УСТРАНЕНО]
 
 ### Описание
 Согласно принципам Clean Architecture и DDD, слой бизнес-логики (`internal/service`) должен зависеть исключительно от доменных сущностей (`internal/domain`) и абстрактных интерфейсов, не привязываясь к конкретным инфраструктурным библиотекам.
 
-В текущей реализации пакет `internal/service` напрямую импортирует `database/sql` в следующих файлах:
-- `internal/service/interfaces.go` — сигнатуры методов `GetByIDTx`, `UpdateStatusTx`, `RecordEventTx`, `RecordSecurityEventTx` и `WithinTransaction` объявляют параметр `tx *sql.Tx`.
-- `internal/service/payment.go` — вызовы транзакционного менеджера `s.txManager.WithinTransaction(ctx, func(txCtx context.Context, tx *sql.Tx) error { ... })` передают `tx` в методы репозиториев.
-- `internal/service/reconciler.go` — транзакционная сверка зависших платежей также оперирует `tx *sql.Tx`.
+Ранее пакет `internal/service` импортировал `database/sql` в `interfaces.go`, `payment.go` и `reconciler.go` для передачи `tx *sql.Tx`.
 
 ### Статус и проверка
-В архитектурном наборе тестов `internal/arch/arch_test.go` добавлен тест:
-```go
-func TestServiceDoesNotImportDatabaseSQL(t *testing.T) {
-    t.Skip("known debt: internal/service imports database/sql in interfaces.go, payment.go, reconciler.go for TxManager and *sql.Tx")
-    ...
-}
-```
-Тест помечен `t.Skip` с причиной `"known debt"` во избежание блокировки пайплайна.
-
-### Рекомендации по устранению долга
-1. **Tx-in-Context паттерн**: Передавать транзакционный контекст не через явный указатель `tx *sql.Tx`, а через контекст `context.Context` (например, `ctx = contextWithTx(ctx, tx)`). Репозитории на уровне `internal/storage/sqlite` извлекают `*sql.Tx` из `ctx`, а `internal/service` оперирует только стандартным `context.Context`.
-2. **Абстрактный интерфейс транзакции**: Заменить `*sql.Tx` на доменный интерфейс транзакции `domain.Tx` / `service.Tx`, реализуемый инфраструктурными адаптерами.
+Долг полностью устранён внедрением паттерна **Tx-in-Context**:
+1. Транзакционный менеджер `WithinTransaction(ctx, func(txCtx context.Context) error)` инжектирует активную транзакцию в контекст (`sqlite.ContextWithTx(ctx, tx)`).
+2. Репозитории `sqlite` извлекают транзакцию из контекста (`TxFromContext(ctx)`) через `dbExecutor`, прозрачно используя транзакцию или пул подключений `*sql.DB`.
+3. In-memory хранилище `memory` работает аналогично через снимок и откат без каких-либо ссылок на `sql.Tx`.
+4. В `internal/arch/arch_test.go` снят `t.Skip` с теста `TestServiceDoesNotImportDatabaseSQL`, и тест успешно проходит (`PASS`).
+5. Пакет `internal/service` больше не импортирует `database/sql` ни в одном файле.
 
 ---
 

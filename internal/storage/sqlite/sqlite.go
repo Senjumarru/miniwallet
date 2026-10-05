@@ -106,13 +106,32 @@ func (s *Storage) SeedOrder(o *domain.Order) {
 	}
 }
 
-func (s *Storage) WithinTransaction(ctx context.Context, fn func(txCtx context.Context, tx *sql.Tx) error) error {
+type txContextKey struct{}
+
+// ContextWithTx injects an active SQL transaction into context.
+func ContextWithTx(ctx context.Context, tx *sql.Tx) context.Context {
+	return context.WithValue(ctx, txContextKey{}, tx)
+}
+
+// TxFromContext extracts an active SQL transaction from context, or returns nil.
+func TxFromContext(ctx context.Context) *sql.Tx {
+	if ctx == nil {
+		return nil
+	}
+	if tx, ok := ctx.Value(txContextKey{}).(*sql.Tx); ok {
+		return tx
+	}
+	return nil
+}
+
+func (s *Storage) WithinTransaction(ctx context.Context, fn func(txCtx context.Context) error) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
 
-	if err := fn(ctx, tx); err != nil {
+	txCtx := ContextWithTx(ctx, tx)
+	if err := fn(txCtx); err != nil {
 		if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
 			return errors.Join(err, fmt.Errorf("rollback transaction: %w", rbErr))
 		}

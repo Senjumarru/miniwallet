@@ -2,7 +2,6 @@ package sqlite_test
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -324,19 +323,19 @@ func TestPaymentRepository_UpdateStatusConflict(t *testing.T) {
 		t.Fatalf("expected domain.ErrPaymentNotFound, got %v", errNotFound)
 	}
 
-	// Test order UpdateStatusTx
-	err = store.WithinTransaction(ctx, func(txCtx context.Context, tx *sql.Tx) error {
+	// Test order UpdateStatus within transaction
+	err = store.WithinTransaction(ctx, func(txCtx context.Context) error {
 		// Update order from unpaid to paid
-		if err := orderRepo.UpdateStatusTx(txCtx, tx, 10, domain.OrderStatusUnpaid, domain.OrderStatusPaid); err != nil {
+		if err := orderRepo.UpdateStatus(txCtx, 10, domain.OrderStatusUnpaid, domain.OrderStatusPaid); err != nil {
 			return err
 		}
 		// Try to update again from unpaid to canceled -> must return domain.ErrStatusConflict
-		errOrderConflict := orderRepo.UpdateStatusTx(txCtx, tx, 10, domain.OrderStatusUnpaid, domain.OrderStatusCanceled)
+		errOrderConflict := orderRepo.UpdateStatus(txCtx, 10, domain.OrderStatusUnpaid, domain.OrderStatusCanceled)
 		if !errors.Is(errOrderConflict, domain.ErrStatusConflict) {
 			t.Fatalf("expected domain.ErrStatusConflict for order, got %v", errOrderConflict)
 		}
 		// Non-existent order -> ErrOrderNotFound
-		errOrderNotFound := orderRepo.UpdateStatusTx(txCtx, tx, 888888, domain.OrderStatusUnpaid, domain.OrderStatusPaid)
+		errOrderNotFound := orderRepo.UpdateStatus(txCtx, 888888, domain.OrderStatusUnpaid, domain.OrderStatusPaid)
 		if !errors.Is(errOrderNotFound, domain.ErrOrderNotFound) {
 			t.Fatalf("expected domain.ErrOrderNotFound, got %v", errOrderNotFound)
 		}
@@ -521,7 +520,8 @@ func TestSQLite_Concurrent50WritingTransactions(t *testing.T) {
 			<-startBarrier
 
 			// Each goroutine executes a write transaction with BEGIN IMMEDIATE
-			txErr := store.WithinTransaction(ctx, func(txCtx context.Context, tx *sql.Tx) error {
+			txErr := store.WithinTransaction(ctx, func(txCtx context.Context) error {
+				tx := sqlite.TxFromContext(txCtx)
 				_, execErr := tx.ExecContext(txCtx, `
 					INSERT INTO orders (id, user_id, amount_minor, currency, status)
 					VALUES (?, 1, ?, 'KZT', 'unpaid')`, id, id*100)

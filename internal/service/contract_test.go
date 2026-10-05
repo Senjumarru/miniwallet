@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -32,7 +31,7 @@ type contractTestStore interface {
 	Webhooks() service.WebhookEventRepository
 	PaymentEvents() service.PaymentEventRepository
 	SecurityEvents() service.SecurityEventRepository
-	WithinTransaction(ctx context.Context, fn func(txCtx context.Context, tx *sql.Tx) error) error
+	WithinTransaction(ctx context.Context, fn func(txCtx context.Context) error) error
 	SeedUser(u *domain.User)
 	SeedOrder(o *domain.Order)
 }
