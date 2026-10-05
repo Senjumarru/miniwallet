@@ -1,0 +1,40 @@
+services:
+  miniwallet:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: miniwallet
+    ports:
+      - "8080:8080"
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8080
+      - DB_PATH=/app/data/miniwallet.db
+      - DEV=false
+      - LOG_LEVEL=info
+      - JWT_SECRET=change-me-to-a-secure-random-jwt-key-with-min-32-chars
+      - WEBHOOK_SECRET=change-me-to-a-secure-webhook-key-with-min-32-chars
+      - PROVIDER_BASE_URL=https://provider.example.com
+    volumes:
+      - miniwallet-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: miniwallet-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    restart: unless-stopped
+    depends_on:
+      - miniwallet
+
+volumes:
+  miniwallet-data:
