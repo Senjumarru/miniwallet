@@ -168,6 +168,39 @@ func (r *Reconciler) reconcilePayment(ctx context.Context, p *domain.Payment) er
 					return fmt.Errorf("attach provider payment id: %w", err)
 				}
 			}
+
+			// Проверяем статус заказа
+			order, err := r.orders.GetByIDTx(txCtx, tx, p.OrderID)
+			if err != nil {
+				return fmt.Errorf("load order %d: %w", p.OrderID, err)
+			}
+
+			if order.Status == domain.OrderStatusPaid {
+				r.logger.WarnContext(txCtx, "order already paid; duplicate reconciled payment requires refund",
+					slog.Int64("payment_id", p.ID),
+					slog.Int64("order_id", order.ID),
+				)
+				upErr := r.payments.UpdateStatusTx(txCtx, tx, p.ID, domain.PaymentStatusPending, domain.PaymentStatusSucceeded)
+				if upErr != nil {
+					var uniqErr *domain.ErrUniqueViolation
+					if errors.As(upErr, &uniqErr) {
+						r.logger.WarnContext(txCtx, "duplicate succeeded payment unique index conflict handled",
+							slog.Int64("payment_id", p.ID),
+							slog.Int64("order_id", order.ID),
+						)
+					} else if !errors.Is(upErr, domain.ErrStatusConflict) {
+						return fmt.Errorf("update duplicate payment status: %w", upErr)
+					}
+				}
+				return r.paymentEvents.RecordEventTx(txCtx, tx, domain.PaymentEvent{
+					PaymentID:  p.ID,
+					EventType:  "reconciliation.duplicate_requires_refund",
+					FromStatus: string(domain.PaymentStatusPending),
+					ToStatus:   string(domain.PaymentStatusSucceeded),
+					Metadata:   fmt.Sprintf(`{"order_id":%d,"lookup_id":%q,"alert":"duplicate_payment_for_paid_order"}`, order.ID, lookupID),
+				})
+			}
+
 			if err := r.payments.UpdateStatusTx(txCtx, tx, p.ID, domain.PaymentStatusPending, domain.PaymentStatusSucceeded); err != nil {
 				return err
 			}

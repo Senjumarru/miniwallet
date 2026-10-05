@@ -847,3 +847,91 @@ func TestContract_Reconciler_ProviderSucceeded_MarksOrderPaid(t *testing.T) {
 		})
 	}
 }
+
+// 8. Reconciler: When order is already Paid, Reconciler handles duplicate succeeded payment gracefully without infinite loop
+func TestContract_Reconciler_OrderAlreadyPaid_HandlesDuplicateGracefully(t *testing.T) {
+	for _, factory := range getStoreFactories(t) {
+		t.Run(factory.name, func(t *testing.T) {
+			ctx := context.Background()
+			store, teardown := factory.setup(t)
+			defer teardown()
+
+			prov := &fakeProvider{
+				statusByID: map[string]domain.PaymentStatus{
+					"ch_dup_succ_1": domain.PaymentStatusSucceeded,
+				},
+			}
+			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+			store.SeedUser(&domain.User{ID: 401, Email: "rec_dup@kz", IsActive: true})
+			// Заказ уже оплачен!
+			store.SeedOrder(&domain.Order{ID: 401, UserID: 401, AmountMinor: 50000, Currency: "KZT", Status: domain.OrderStatusPaid})
+
+			oldTime := time.Now().UTC().Add(-30 * time.Minute)
+			p := &domain.Payment{
+				UserID:            401,
+				OrderID:           401,
+				AmountMinor:       50000,
+				Currency:          "KZT",
+				Status:            domain.PaymentStatusPending,
+				IdempotencyKey:    "contract-reconcile-dup-key-1",
+				RequestHash:       "hash-rec-dup",
+				ProviderPaymentID: "ch_dup_succ_1",
+				CreatedAt:         oldTime,
+				UpdatedAt:         oldTime,
+			}
+			if err := store.Payments().CreatePending(ctx, p); err != nil {
+				t.Fatalf("create pending: %v", err)
+			}
+			if err := store.Payments().UpdateSession(ctx, p.ID, "ch_dup_succ_1", "https://checkout.fake/pay"); err != nil {
+				t.Fatalf("update session: %v", err)
+			}
+
+			reconciler := service.NewReconciler(
+				store.Payments(),
+				store.Orders(),
+				store.PaymentEvents(),
+				store,
+				prov,
+				logger,
+				service.ReconcilerConfig{
+					TTL:      15 * time.Minute,
+					Interval: 1 * time.Minute,
+					Batch:    10,
+				},
+			)
+
+			count, err := reconciler.ReconcileOnce(ctx)
+			if err != nil {
+				t.Fatalf("reconcile once failed: %v", err)
+			}
+			if count != 1 {
+				t.Fatalf("expected 1 reconciled payment, got %d", count)
+			}
+
+			pUpdated, err := store.Payments().GetByID(ctx, p.ID)
+			if err != nil {
+				t.Fatalf("get payment: %v", err)
+			}
+			if pUpdated.Status == domain.PaymentStatusPending {
+				t.Fatalf("payment must not remain pending after reconciliation")
+			}
+
+			// Проверяем, что зафиксировано событие о дубликате, требующем возврата
+			events, err := store.PaymentEvents().ListByPaymentID(ctx, p.ID)
+			if err != nil {
+				t.Fatalf("list payment events: %v", err)
+			}
+			foundRefundAlert := false
+			for _, ev := range events {
+				if ev.EventType == "reconciliation.duplicate_requires_refund" {
+					foundRefundAlert = true
+					break
+				}
+			}
+			if !foundRefundAlert {
+				t.Fatalf("expected reconciliation.duplicate_requires_refund event, got %+v", events)
+			}
+		})
+	}
+}
